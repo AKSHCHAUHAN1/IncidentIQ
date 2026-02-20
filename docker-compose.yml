@@ -1,0 +1,98 @@
+services:
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: incident_predictor
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics
+    ports:
+      - "8428:8428"
+    command:
+      - "-retentionPeriod=7"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    restart: unless-stopped
+
+  data-ingestion:
+    build: ./services/data-ingestion
+    environment:
+      REDIS_HOST: redis
+      POSTGRES_HOST: postgres
+      VICTORIA_URL: http://victoria-metrics:8428
+    ports:
+      - "4000:4000"
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  prometheus-producer:
+    build: ./services/prometheus-producer
+    environment:
+      REDIS_HOST: redis
+      PROMETHEUS_URL: http://prometheus:9090
+    depends_on:
+      - redis
+      - prometheus
+    restart: unless-stopped
+
+  synthetic-generator:
+    build: ./services/synthetic-generator
+    environment:
+      REDIS_HOST: redis
+    depends_on:
+      - redis
+    restart: unless-stopped
+  
+  ml-service:
+    platform: linux/amd64
+    build:
+      context: ./services/ml-service
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=incident_predictor
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    depends_on:
+      - postgres
+
+volumes:
+  pg_data:
+  grafana_data:

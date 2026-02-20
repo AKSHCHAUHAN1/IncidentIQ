@@ -1,0 +1,17 @@
+{
+  "title": "Service Metrics",
+  "schemaVersion": 36,
+  "version": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "CPU 1-min Avg",
+      "targets": [
+        {
+          "rawSql": "SELECT bucket AS time, avg_value FROM metrics.metrics_1min WHERE metric_name='cpu' ORDER BY bucket",
+          "format": "time_series"
+        }
+      ]
+    }
+  ]
+}
