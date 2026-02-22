@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Docker Compose
+        run: sudo apt-get install docker-compose -y
+
+      - name: Build
+        run: docker-compose build
+
+      - name: Start stack
+        run: docker-compose up -d
+
+      - name: Wait for services
+        run: sleep 30
+
+      - name: Health check
+        run: curl --fail http://localhost:4000/health/ready

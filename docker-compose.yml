@@ -1,7 +1,7 @@
 services:
 
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb-ha:pg16   # includes pgvector
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -77,7 +77,7 @@ services:
     depends_on:
       - redis
     restart: unless-stopped
-  
+
   ml-service:
     platform: linux/amd64
     build:
@@ -90,9 +90,13 @@ services:
       - DB_NAME=incident_predictor
       - DB_USER=postgres
       - DB_PASSWORD=postgres
+    volumes:
+      - ml_models:/app/models   # persists trained model across restarts
     depends_on:
       - postgres
+    restart: unless-stopped
 
 volumes:
   pg_data:
   grafana_data:
+  ml_models:             # trained model persists here

@@ -7,7 +7,8 @@ let running = true;
 export async function startWorker() {
   console.log("Starting ingestion worker...");
 
-  await redis.xgroup("CREATE", "metrics_stream", "group1", "$", "MKSTREAM")
+  await redis
+    .xgroup("CREATE", "metrics_stream", "group1", "$", "MKSTREAM")
     .catch(() => {});
 
   while (running) {
@@ -24,20 +25,31 @@ export async function startWorker() {
       const [, messages] = response[0];
 
       for (const [id, fields] of messages) {
+        // FIX: parse by key name, not index position (order not guaranteed)
+        const obj = {};
+        for (let i = 0; i < fields.length; i += 2) {
+          obj[fields[i]] = fields[i + 1];
+        }
+
         const metric = {
           time: new Date(),
-          service_id: fields[1],
-          metric_name: fields[3],
-          value: parseFloat(fields[5])
+          service_id: obj.service_id,
+          metric_name: obj.metric_name,
+          value: parseFloat(obj.value),
         };
 
         await pool.query(
           `INSERT INTO metrics.raw_metrics(time, service_id, metric_name, value)
-           VALUES($1,$2,$3,$4)`,
+           VALUES($1, $2, $3, $4)`,
           [metric.time, metric.service_id, metric.metric_name, metric.value]
         );
 
-        await writeToVictoria(metric);
+        // FIX: Victoria failure is non-fatal, don't let it block ack
+        try {
+          await writeToVictoria(metric);
+        } catch (err) {
+          console.warn("Victoria write failed (non-fatal):", err.message);
+        }
 
         await redis.xack("metrics_stream", "group1", id);
       }
