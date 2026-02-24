@@ -53,11 +53,14 @@ services:
       REDIS_HOST: redis
       POSTGRES_HOST: postgres
       VICTORIA_URL: http://victoria-metrics:8428
+      ML_URL: http://ml-service:8000/predict
+      INPUT_WINDOW: 20
     ports:
       - "4000:4000"
     depends_on:
       - redis
       - postgres
+      - ml-service
     restart: unless-stopped
 
   prometheus-producer:
@@ -94,6 +97,21 @@ services:
       - ml_models:/app/models   # persists trained model across restarts
     depends_on:
       - postgres
+    restart: unless-stopped
+    
+  decision-engine:
+    build: ./services/decision-engine
+    container_name: decision-engine
+    depends_on:
+      - ml-service
+    restart: unless-stopped
+
+  remediation-engine:
+    build: ./services/remediation-engine
+    container_name: remediation-engine
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
 volumes:
