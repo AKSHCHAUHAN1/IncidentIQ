@@ -131,6 +131,13 @@ async function triggerPrediction(serviceId, window) {
       body: JSON.stringify({
         service_id: serviceId,
         prediction: result,
+        current_metrics: {
+          cpu: state.cpu,
+          memory: state.memory,
+          request_rate: state.request_rate,
+          error_rate: state.error_rate,
+          latency: state.latency
+        }
       }),
     });
 
