@@ -25,11 +25,11 @@ async function loop() {
 
   while (true) {
     try {
-      const cpu = random(40, 20);
-      const memory = random(60, 15);
-      const request_rate = random(500, 200);
-      const error_rate = Math.max(0, random(5, 5));
-      const latency = random(120, 40);
+      const cpu = 95 + Math.random() * 3;
+      const memory = 92 + Math.random() * 3;
+      const request_rate = 1500 + Math.random() * 200;
+      const error_rate = 30 + Math.random() * 5;
+      const latency = 450 + Math.random() * 100;
 
       await pushMetric("service-a", "cpu", cpu);
       await pushMetric("service-a", "memory", memory);

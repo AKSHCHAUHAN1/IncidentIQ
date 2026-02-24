@@ -7,25 +7,36 @@ app.use(express.json());
 const REMEDIATION_URL =
   process.env.REMEDIATION_URL || "http://remediation-engine:6000/act";
 
-function classifySeverity(predictionData) {
+/**
+ * Compare actual current metrics vs predicted baseline
+ * If deviation is high → anomaly
+ */
+function classifySeverity(predictionData, currentMetrics) {
   const future = predictionData?.prediction;
-
   if (!future || future.length === 0) return "normal";
 
-  // use last predicted timestep
-  const last = future[future.length - 1];
+  const predicted = future[0]; // next-step forecast
 
-  const cpu = last[0];
-  const memory = last[1];
-  const requestRate = last[2];
-  const errorRate = last[3];
-  const latency = last[4];
+  const cpuDeviation = Math.abs(currentMetrics.cpu - predicted[0]);
+  const memoryDeviation = Math.abs(currentMetrics.memory - predicted[1]);
+  const errorDeviation = Math.abs(currentMetrics.error_rate - predicted[3]);
+  const latencyDeviation = Math.abs(currentMetrics.latency - predicted[4]);
 
-  if (cpu > 85 || memory > 85 || errorRate > 20 || latency > 300) {
+  if (
+    cpuDeviation > 30 ||
+    memoryDeviation > 30 ||
+    errorDeviation > 15 ||
+    latencyDeviation > 150
+  ) {
     return "critical";
   }
 
-  if (cpu > 70 || memory > 75 || errorRate > 10 || latency > 200) {
+  if (
+    cpuDeviation > 15 ||
+    memoryDeviation > 15 ||
+    errorDeviation > 8 ||
+    latencyDeviation > 80
+  ) {
     return "warning";
   }
 
@@ -34,9 +45,9 @@ function classifySeverity(predictionData) {
 
 app.post("/evaluate", async (req, res) => {
   try {
-    const { service_id, prediction } = req.body;
+    const { service_id, prediction, current_metrics } = req.body;
 
-    const severity = classifySeverity(prediction);
+    const severity = classifySeverity(prediction, current_metrics);
 
     console.log("Decision:", service_id, severity);
 
