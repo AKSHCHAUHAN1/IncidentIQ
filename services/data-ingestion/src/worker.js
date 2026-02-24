@@ -91,7 +91,7 @@ export async function startWorker() {
          }
         
          if (state.window.length === INPUT_WINDOW) {
-          await triggerPrediction(metric.service_id, state.window);
+          await triggerPrediction(metric.service_id, state.window, state);
          }
        }
 
@@ -103,7 +103,7 @@ export async function startWorker() {
   }
 }
 
-async function triggerPrediction(serviceId, window) {
+async function triggerPrediction(serviceId, window, state) {
   try {
     const payload = {
       data: window // adapt to model shape if needed

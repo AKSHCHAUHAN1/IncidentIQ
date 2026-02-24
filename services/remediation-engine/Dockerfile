@@ -1,5 +1,10 @@
 FROM node:18
 
+# install docker CLI
+RUN apt-get update && \
+    apt-get install -y docker.io && \
+    apt-get clean
+
 WORKDIR /app
 
 COPY package.json .
