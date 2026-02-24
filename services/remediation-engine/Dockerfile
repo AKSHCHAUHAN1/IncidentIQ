@@ -1,9 +1,9 @@
 FROM node:18
 
-# install docker CLI
+# install latest docker CLI
 RUN apt-get update && \
-    apt-get install -y docker.io && \
-    apt-get clean
+    apt-get install -y curl && \
+    curl -fsSL https://get.docker.com | sh
 
 WORKDIR /app
 

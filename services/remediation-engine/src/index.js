@@ -4,13 +4,27 @@ import { exec } from "child_process";
 const app = express();
 app.use(express.json());
 
-function restartService(service) {
-  exec(`docker restart ${service}`, (err, stdout, stderr) => {
+// Map logical service IDs → real Docker container names
+const containerMap = {
+  "service-a": "synthetic-generator",
+  "service-b": "data-ingestion",
+  "service-c": "ml-service"
+};
+
+function restartService(serviceId) {
+  const container = containerMap[serviceId];
+
+  if (!container) {
+    console.log("No container mapping found for:", serviceId);
+    return;
+  }
+
+  exec(`docker restart ${container}`, (err, stdout, stderr) => {
     if (err) {
       console.error("Restart error:", err.message);
       return;
     }
-    console.log("Restarted:", service);
+    console.log("Restarted:", container);
   });
 }
 
@@ -24,7 +38,7 @@ app.post("/act", (req, res) => {
   }
 
   if (severity === "warning") {
-    console.log("Warning: monitor service", service_id);
+    console.log("Warning: monitoring service", service_id);
   }
 
   res.json({ status: "action triggered" });
