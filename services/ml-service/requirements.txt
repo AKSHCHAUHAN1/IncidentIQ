@@ -9,3 +9,6 @@ uvicorn
 joblib
 python-multipart
 sqlalchemy
+transformers==4.37.2
+datasets==2.16.1
+accelerate==0.26.1

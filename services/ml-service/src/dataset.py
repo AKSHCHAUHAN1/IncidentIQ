@@ -57,3 +57,11 @@ def create_sequences(data):
         raise ValueError("Sequence generation failed. No valid sequences created.")
 
     return np.array(X), np.array(y)
+
+def load_flat_training_data():
+    """
+    Returns flat feature rows:
+    [[cpu, memory, request_rate, error_rate, latency], ...]
+    Used for Isolation Forest training.
+    """
+    return load_data()
