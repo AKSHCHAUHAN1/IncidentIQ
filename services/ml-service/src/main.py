@@ -8,6 +8,10 @@ from typing import List
 from model import LSTMModel
 from config import FEATURES, INPUT_WINDOW, OUTPUT_WINDOW
 from sklearn.ensemble import IsolationForest
+from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification
+
+log_model = None
+log_tokenizer = None
 
 app = FastAPI(
     title="Incident Predictor ML Service",
@@ -24,7 +28,7 @@ BASE_DIR = "/app/models"
 
 
 def load_models():
-    global model, scaler, iso_model
+    global model, scaler, iso_model, log_model, log_tokenizer
 
     # ---- Load LSTM ----
     model_path = os.path.join(BASE_DIR, "model.pt")
@@ -47,6 +51,17 @@ def load_models():
         print("Isolation Forest loaded successfully.")
     else:
         print("Isolation Forest model not found.")
+
+    # ---- Load Log Model ----
+    log_path = os.path.join(BASE_DIR, "log_model")
+
+    if os.path.exists(log_path):
+        log_model = DistilBertForSequenceClassification.from_pretrained(log_path)
+        log_tokenizer = DistilBertTokenizerFast.from_pretrained(log_path)
+        log_model.eval()
+        print("Log classifier loaded successfully.")
+    else:
+        print("Log model not found.")
 
 
 @app.on_event("startup")
@@ -134,4 +149,35 @@ def detect_anomaly(request: PredictRequest):
     return {
         "anomaly_flags": flags.tolist(),
         "anomaly_scores": scores.tolist()
+    }
+
+# ───────────────────────── Log Classification ─────────────────────────
+
+class LogRequest(BaseModel):
+    log_text: str
+
+
+@app.post("/classify-log")
+def classify_log(req: LogRequest):
+
+    if log_model is None or log_tokenizer is None:
+        raise HTTPException(status_code=503, detail="Log model not trained")
+
+    inputs = log_tokenizer(req.log_text, return_tensors="pt")
+
+    with torch.no_grad():
+        outputs = log_model(**inputs)
+
+    probs = torch.softmax(outputs.logits, dim=1)
+    predicted_class = torch.argmax(probs, dim=1).item()
+
+    label_map = {
+        0: "normal",
+        1: "warning",
+        2: "critical"
+    }
+
+    return {
+        "prediction": label_map[predicted_class],
+        "probabilities": probs.tolist()
     }
