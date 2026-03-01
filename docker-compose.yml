@@ -1,7 +1,7 @@
 services:
 
   postgres:
-    image: timescale/timescaledb-ha:pg16   # includes pgvector
+    image: timescale/timescaledb-ha:pg16
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -47,20 +47,13 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
     restart: unless-stopped
 
-  data-ingestion:
-    build: ./services/data-ingestion
+  synthetic-generator:
+    build: ./services/synthetic-generator
     environment:
       REDIS_HOST: redis
-      POSTGRES_HOST: postgres
-      VICTORIA_URL: http://victoria-metrics:8428
-      ML_URL: http://ml-service:8000/predict
-      INPUT_WINDOW: 20
-    ports:
-      - "4000:4000"
+      MODE: spike          # normal=training data | spike=test remediation
     depends_on:
       - redis
-      - postgres
-      - ml-service
     restart: unless-stopped
 
   prometheus-producer:
@@ -73,12 +66,22 @@ services:
       - prometheus
     restart: unless-stopped
 
-  synthetic-generator:
-    build: ./services/synthetic-generator
+  data-ingestion:
+    build: ./services/data-ingestion
     environment:
       REDIS_HOST: redis
+      POSTGRES_HOST: postgres
+      VICTORIA_URL: http://victoria-metrics:8428
+      ML_URL: http://ml-service:8000/predict
+      DECISION_URL: http://decision-engine:5000/evaluate
+      INPUT_WINDOW: 20
+    ports:
+      - "4000:4000"
     depends_on:
       - redis
+      - postgres
+      - ml-service
+      - decision-engine
     restart: unless-stopped
 
   ml-service:
@@ -94,27 +97,67 @@ services:
       - DB_USER=postgres
       - DB_PASSWORD=postgres
     volumes:
-      - ml_models:/app/models   # persists trained model across restarts
+      - ml_models:/app/models
     depends_on:
       - postgres
     restart: unless-stopped
-    
+
   decision-engine:
     build: ./services/decision-engine
     container_name: decision-engine
+    ports:
+      - "5000:5000"
+    environment:
+      REMEDIATION_URL: http://remediation-engine:6000/act
+      API_GATEWAY_URL: http://api-gateway:3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: incident_predictor
+      DB_USER: postgres
+      DB_PASSWORD: postgres
     depends_on:
-      - ml-service
+      - postgres
+      - remediation-engine
     restart: unless-stopped
 
   remediation-engine:
     build: ./services/remediation-engine
     container_name: remediation-engine
+    ports:
+      - "6000:6000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: incident_predictor
+      DB_USER: postgres
+      DB_PASSWORD: postgres
     privileged: true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: incident_predictor
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REMEDIATION_URL: http://remediation-engine:6000
+      JWT_SECRET: incidentiq-dev-secret
+      PORT: 3000
+    depends_on:
+      - postgres
+      - remediation-engine
+      - decision-engine
     restart: unless-stopped
 
 volumes:
   pg_data:
   grafana_data:
-  ml_models:             # trained model persists here
+  ml_models:

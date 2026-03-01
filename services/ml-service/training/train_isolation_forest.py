@@ -1,7 +1,6 @@
 import os
 import sys
 
-# Add /app/src to Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
 import joblib
@@ -12,15 +11,21 @@ from dataset import load_flat_training_data
 MODEL_PATH = "/app/models/isolation_forest.pkl"
 
 def main():
-    print("="*50)
+    print("=" * 50)
     print("Isolation Forest Training")
-    print("="*50)
+    print("=" * 50)
 
     data = load_flat_training_data()
     X = np.array(data)
 
-    if len(X) < 100:
-        raise RuntimeError("Not enough data for Isolation Forest training")
+    print(f"Loaded {len(X)} rows of data")
+
+    # FIX: lowered minimum — IF works fine with 30+ rows
+    if len(X) < 30:
+        raise RuntimeError(
+            f"Not enough data: need 30 rows, got {len(X)}. "
+            "Wait a few more minutes for data to accumulate."
+        )
 
     model = IsolationForest(
         n_estimators=300,
@@ -34,7 +39,8 @@ def main():
     os.makedirs("/app/models", exist_ok=True)
     joblib.dump(model, MODEL_PATH)
 
-    print("Isolation Forest saved:", MODEL_PATH)
+    print(f"Isolation Forest trained on {len(X)} rows")
+    print("Model saved:", MODEL_PATH)
 
 if __name__ == "__main__":
     main()

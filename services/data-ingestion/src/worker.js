@@ -4,6 +4,7 @@ import { writeToVictoria } from "./victoria.js";
 import fetch from "node-fetch";
 
 const ML_URL = process.env.ML_URL || "http://ml-service:8000/predict";
+const DECISION_URL = process.env.DECISION_URL || "http://decision-engine:5000/evaluate";
 const INPUT_WINDOW = parseInt(process.env.INPUT_WINDOW || "20");
 
 let running = true;
@@ -51,49 +52,45 @@ export async function startWorker() {
           [metric.time, metric.service_id, metric.metric_name, metric.value]
         );
 
+        // FIX: Victoria failure is non-fatal
         try {
           await writeToVictoria(metric);
         } catch (err) {
           console.warn("Victoria write failed:", err.message);
         }
 
-       // ===== ML FEATURE BUFFER (CORRECT) =====
+        // ===== ML FEATURE BUFFER =====
+        if (!serviceBuffers.has(metric.service_id)) {
+          serviceBuffers.set(metric.service_id, {});
+        }
 
-       if (!serviceBuffers.has(metric.service_id)) {
-        serviceBuffers.set(metric.service_id, {});
-       }
-      
-       const state = serviceBuffers.get(metric.service_id);
-      
-       // store latest metric value by name
-       state[metric.metric_name] = metric.value;
+        const state = serviceBuffers.get(metric.service_id);
+        state[metric.metric_name] = metric.value;
 
-       const required = ["cpu", "memory", "request_rate", "error_rate", "latency"];
+        const required = ["cpu", "memory", "request_rate", "error_rate", "latency"];
+        const ready = required.every(k => state[k] !== undefined);
 
-       // check if we have full feature set
-       const ready = required.every(k => state[k] !== undefined);
+        if (ready) {
+          if (!state.window) state.window = [];
 
-       if (ready) {
-         if (!state.window) state.window = [];
+          const featureVector = [
+            state.cpu,
+            state.memory,
+            state.request_rate,
+            state.error_rate,
+            state.latency
+          ];
 
-         const featureVector = [
-          state.cpu,
-          state.memory,
-          state.request_rate,
-          state.error_rate,
-          state.latency
-         ];
+          state.window.push(featureVector);
 
-         state.window.push(featureVector);
+          if (state.window.length > INPUT_WINDOW) {
+            state.window.shift();
+          }
 
-         if (state.window.length > INPUT_WINDOW) {
-          state.window.shift();
-         }
-        
-         if (state.window.length === INPUT_WINDOW) {
-          await triggerPrediction(metric.service_id, state.window, state);
-         }
-       }
+          if (state.window.length === INPUT_WINDOW) {
+            await triggerPrediction(metric.service_id, state.window, state);
+          }
+        }
 
         await redis.xack("metrics_stream", "group1", id);
       }
@@ -105,14 +102,10 @@ export async function startWorker() {
 
 async function triggerPrediction(serviceId, window, state) {
   try {
-    const payload = {
-      data: window // adapt to model shape if needed
-    };
-
     const res = await fetch(ML_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ data: window }),
     });
 
     if (!res.ok) {
@@ -121,11 +114,10 @@ async function triggerPrediction(serviceId, window, state) {
     }
 
     const result = await res.json();
-
     console.log("Prediction for", serviceId, result);
 
-    // Forward to decision engine
-    await fetch("http://decision-engine:5000/evaluate", {
+    // FIX: use env var instead of hardcoded URL
+    await fetch(DECISION_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

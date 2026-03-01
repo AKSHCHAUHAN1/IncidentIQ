@@ -12,8 +12,10 @@ def load_data():
         f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
 
+    # FIX: use 10-second buckets instead of 1-minute
+    # synthetic generator pushes every 5s so this gives ~2x more rows
     query = """
-    SELECT time_bucket('1 minute', time) as minute,
+    SELECT time_bucket('10 seconds', time) as minute,
            metric_name,
            avg(value) as value
     FROM metrics.raw_metrics
@@ -28,18 +30,17 @@ def load_data():
 
     pivot = df.pivot(index="minute", columns="metric_name", values="value")
 
-    # Ensure required features exist
     missing = [f for f in FEATURES if f not in pivot.columns]
     if missing:
         raise ValueError(f"Missing required metrics: {missing}")
 
     pivot = pivot[FEATURES]
-
     pivot = pivot.ffill().dropna()
 
     if len(pivot) < INPUT_WINDOW + OUTPUT_WINDOW:
         raise ValueError(
-            f"Not enough data. Required: {INPUT_WINDOW + OUTPUT_WINDOW}, Found: {len(pivot)}"
+            f"Not enough data. Required: {INPUT_WINDOW + OUTPUT_WINDOW}, Found: {len(pivot)}. "
+            f"Wait a few more minutes."
         )
 
     return pivot.values
@@ -58,10 +59,10 @@ def create_sequences(data):
 
     return np.array(X), np.array(y)
 
+
 def load_flat_training_data():
     """
-    Returns flat feature rows:
+    Returns flat feature rows for Isolation Forest training.
     [[cpu, memory, request_rate, error_rate, latency], ...]
-    Used for Isolation Forest training.
     """
     return load_data()
