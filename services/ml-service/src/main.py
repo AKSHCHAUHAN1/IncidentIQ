@@ -76,9 +76,9 @@ def health():
     return {
         "status": "running",
         "lstm_loaded": model is not None,
-        "iso_loaded": iso_model is not None
+        "iso_loaded": iso_model is not None,
+        "log_loaded": log_model is not None
     }
-
 
 # ───────────────────────── Predict (LSTM) ─────────────────────────
 
@@ -180,4 +180,82 @@ def classify_log(req: LogRequest):
     return {
         "prediction": label_map[predicted_class],
         "probabilities": probs.tolist()
+    }
+
+class EnsembleRequest(BaseModel):
+    metrics_window: List[List[float]]
+    log_text: str
+
+@app.post("/ensemble")
+def ensemble_predict(req: EnsembleRequest):
+
+    if model is None or scaler is None:
+        raise HTTPException(status_code=503, detail="LSTM not loaded")
+
+    if iso_model is None:
+        raise HTTPException(status_code=503, detail="Isolation Forest not loaded")
+
+    if log_model is None:
+        raise HTTPException(status_code=503, detail="Log model not loaded")
+
+    arr = np.array(req.metrics_window)
+
+    if arr.shape[0] != INPUT_WINDOW:
+        raise HTTPException(status_code=422, detail="Invalid window size")
+
+    if arr.shape[1] != len(FEATURES):
+        raise HTTPException(status_code=422, detail="Invalid feature size")
+
+    # ----- LSTM Forecast -----
+    arr_scaled = scaler.transform(arr)
+
+    with torch.no_grad():
+        inp = torch.tensor(arr_scaled, dtype=torch.float32).unsqueeze(0)
+        pred = model(inp)
+        pred = pred.reshape(OUTPUT_WINDOW, len(FEATURES))
+        pred = scaler.inverse_transform(pred.numpy())
+
+    future_last = pred[-1]
+    cpu, memory, request_rate, error_rate, latency = future_last
+
+    # ----- Isolation Forest -----
+    iso_flag = iso_model.predict([future_last])[0]
+
+    # ----- Log Model -----
+    inputs = log_tokenizer(req.log_text, return_tensors="pt")
+
+    with torch.no_grad():
+        outputs = log_model(**inputs)
+
+    probs = torch.softmax(outputs.logits, dim=1)
+    log_class = torch.argmax(probs, dim=1).item()
+
+    # ----- Fusion Logic -----
+    severity = "normal"
+
+    if (
+        iso_flag == -1 or
+        log_class == 2 or
+        cpu > 85 or
+        memory > 85 or
+        error_rate > 20 or
+        latency > 300
+    ):
+        severity = "critical"
+
+    elif (
+        log_class == 1 or
+        cpu > 70 or
+        memory > 75 or
+        error_rate > 10 or
+        latency > 200
+    ):
+        severity = "warning"
+
+    return {
+        "severity": severity,
+        "lstm_forecast": pred.tolist(),
+        "iso_flag": int(iso_flag),
+        "log_prediction": log_class,
+        "log_probabilities": probs.tolist()
     }
