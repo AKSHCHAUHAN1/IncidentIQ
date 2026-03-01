@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 1. LOCAL FONT IMPLEMENTATION */
+@font-face {
+  font-family: 'Chillax';
+  src: url('/fonts/Chillax-Bold.woff2') format('woff2'),
+       url('/fonts/Chillax-Bold.woff') format('woff'),
+       url('/fonts/Chillax-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-display: swap;
+  font-style: normal;
+}
+
+/* 2. BULLETPROOF GRADIENT TEXT */
+.incident-logo-gradient {
+  background: linear-gradient(90deg, #ffffff 0%, #c7d2fe 40%, #6366f1 100%);
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+  color: transparent !important;
+}
+
+@layer base {
+  body {
+    @apply bg-background text-white antialiased overflow-x-hidden;
+    letter-spacing: -0.02em;
+  }
+  
+  h1 { font-size: clamp(2.5rem, 5vw + 1rem, 5rem); font-weight: 600; }
+  h2 { font-size: clamp(1.5rem, 3vw + 1rem, 3rem); font-weight: 500; }
+  
+  .tech-border {
+    position: relative;
+    border: 1px solid rgba(255,255,255,0.05);
+  }
+  .tech-border::before, .tech-border::after {
+    content: ''; position: absolute; width: 4px; height: 4px; background: rgba(255,255,255,0.5);
+  }
+  .tech-border::before { top: -2px; left: -2px; }
+  .tech-border::after { bottom: -2px; right: -2px; }
+}
+
+@layer utilities {
+  /* ... (Keeping your existing metal-container and replica-3d-card classes intact for other components) ... */
+  
+  .metal-container { position: relative; border-radius: var(--m-radius, 9999px); padding: var(--m-border, 1px); background: transparent; overflow: hidden; z-index: 1; }
+  .metal-container::before { content: ''; position: absolute; top: 50%; left: 50%; width: 250%; height: 250%; background: conic-gradient(from 0deg, transparent 0%, transparent 15%, rgba(125, 211, 252, 0.5) 21%, #ffffff 23%, #3b82f6 25%, #0f172a 27%, transparent 32%, transparent 65%, rgba(244, 114, 182, 0.3) 71%, #ffffff 73%, #8b5cf6 75%, #1e1b4b 77%, transparent 82%, transparent 100%); transform: translate(-50%, -50%); animation: spin-metal 5s linear infinite; z-index: -1; }
+  .metal-container-static { position: relative; border-radius: var(--m-radius, 9999px); padding: var(--m-border, 1px); background: transparent; overflow: hidden; z-index: 1; }
+  .metal-container-static::before { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(125, 211, 252, 0.4) 0%, #ffffff 8%, #4f46e5 16%, #020617 24%, transparent 35%, transparent 60%, rgba(253, 164, 175, 0.25) 75%, #ffffff 83%, #7c3aed 91%, #000000 100%); z-index: -1; }
+  .metal-surface { position: relative; width: 100%; height: 100%; border-radius: calc(var(--m-radius, 9999px) - var(--m-border, 1px)); background: linear-gradient(160deg, rgba(30,35,45,0.9) 0%, rgba(10,12,15,0.95) 40%, #000 100%); box-shadow: inset 0 1.5px 2px rgba(199,210,254,0.4), inset 0 -20px 40px rgba(0,0,0,1), 0 10px 40px rgba(0,0,0,0.5); z-index: 1; backdrop-filter: blur(24px); }
+  @keyframes spin-metal { 100% { transform: translate(-50%, -50%) rotate(360deg); } }
+  .replica-3d-card { background: linear-gradient(145deg, rgba(30, 30, 35, 0.4) 0%, rgba(10, 10, 12, 0.6) 100%); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); border: 1px solid rgba(255, 255, 255, 0.05); border-top: 1px solid rgba(255, 255, 255, 0.3); border-left: 1px solid rgba(255, 255, 255, 0.15); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.75), inset 0 1.5px 1px rgba(255, 255, 255, 0.4), inset 0 -20px 40px rgba(0, 0, 0, 0.8), inset 0 0 20px rgba(255, 255, 255, 0.02); border-radius: 24px; position: relative; overflow: hidden; }
+  .replica-3d-card::after { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.02) 20%, transparent 50%, rgba(0, 0, 0, 0.3) 100%); pointer-events: none; z-index: 0; }
+  .replica-3d-item { background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.05); border-top: 1px solid rgba(255, 255, 255, 0.15); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 4px 12px rgba(0,0,0,0.2); backdrop-filter: blur(12px); border-radius: 12px; }
+  .replica-3d-pill { position: relative; border-radius: 9999px; overflow: hidden; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); border-top: 1px solid rgba(255, 255, 255, 0.3); border-left: 1px solid rgba(255, 255, 255, 0.15); }
+  .replica-3d-pill::after { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0) 40%, rgba(0,0,0,0.3) 100%); pointer-events: none; z-index: 0; }
+
+  /* =========================================================
+     EXACT REFERENCE REPLICA: INCIDENT STATUS PILLS
+     ========================================================= */
+  .status-badge-ref {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.875rem; 
+    border-radius: 9999px;
+    background-color: #111111; /* Dark matte background */
+    border: 1px solid rgba(255, 255, 255, 0.08); /* Faint barely-there border */
+    color: #e5e5e5; /* Exact light grey/white text from reference */
+    font-size: 0.875rem; 
+    font-weight: 500;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5); 
+    overflow: hidden;
+  }
+
+  /* The centralized top glowing streak */
+  .status-badge-ref::after {
+    content: '';
+    position: absolute;
+    top: -1px; /* Align perfectly over top border */
+    left: 15%;
+    right: 15%;
+    height: 1px;
+    z-index: 10;
+  }
+
+  /* Pending (Amber) */
+  .status-badge-warning::after {
+    background: linear-gradient(90deg, transparent, #eab308, transparent);
+    box-shadow: 0 2px 10px 1px rgba(234, 179, 8, 0.8);
+  }
+  .status-badge-warning .status-icon {
+    color: #eab308;
+    filter: drop-shadow(0 0 6px rgba(234, 179, 8, 0.6));
+  }
+
+  /* Success (Green) */
+  .status-badge-success::after {
+    background: linear-gradient(90deg, transparent, #22c55e, transparent);
+    box-shadow: 0 2px 10px 1px rgba(34, 197, 94, 0.8);
+  }
+  .status-badge-success .status-icon {
+    color: #22c55e;
+    filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.6));
+  }
+
+  /* Failed (Red) */
+  .status-badge-critical::after {
+    background: linear-gradient(90deg, transparent, #ef4444, transparent);
+    box-shadow: 0 2px 10px 1px rgba(239, 68, 68, 0.8);
+  }
+  .status-badge-critical .status-icon {
+    color: #ef4444;
+    filter: drop-shadow(0 0 6px rgba(239, 68, 68, 0.6));
+  }
+}
