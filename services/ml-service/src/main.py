@@ -1,261 +1,254 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+"""
+main.py — ML Service (Month 3 final)
+
+Models:
+  LSTM             → /predict      (z-score normalized forecasting)
+  Isolation Forest → /anomaly      (statistical anomaly detection)
+  TF-IDF+LR       → /classify-log (log severity classification)
+  Ensemble         → /ensemble     (fusion of all three)
+"""
+
+import os
+import sys
 import torch
 import joblib
 import numpy as np
-import os
-from typing import List
-from model import LSTMModel
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from config import FEATURES, INPUT_WINDOW, OUTPUT_WINDOW
-from sklearn.ensemble import IsolationForest
-from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification
+from model  import LSTMModel
 
-log_model = None
-log_tokenizer = None
+app = FastAPI(title="IncidentIQ ML Service")
 
-app = FastAPI(
-    title="Incident Predictor ML Service",
-    description="LSTM + Isolation Forest ML API",
-    version="2.0.0"
-)
+# ── Load models ───────────────────────────────────────────────
+MODEL_DIR = "/app/models"
 
-# Global models
-model = None
-scaler = None
-iso_model = None
-
-BASE_DIR = "/app/models"
-
+lstm_model    = None
+scaler        = None
+baseline      = None   # {"mean": array, "std": array}
+iso_model     = None
+log_classifier = None  # sklearn Pipeline
 
 def load_models():
-    global model, scaler, iso_model, log_model, log_tokenizer
+    global lstm_model, scaler, baseline, iso_model, log_classifier
 
-    # ---- Load LSTM ----
-    model_path = os.path.join(BASE_DIR, "model.pt")
-    scaler_path = os.path.join(BASE_DIR, "scaler.pkl")
-
-    if os.path.exists(model_path) and os.path.exists(scaler_path):
-        model = LSTMModel(len(FEATURES))
-        model.load_state_dict(torch.load(model_path, map_location="cpu"))
-        model.eval()
-        scaler = joblib.load(scaler_path)
-        print("LSTM model loaded successfully.")
+    # LSTM
+    lstm_path = os.path.join(MODEL_DIR, "model.pt")
+    if os.path.exists(lstm_path):
+        lstm_model = LSTMModel(len(FEATURES))
+        lstm_model.load_state_dict(torch.load(lstm_path, map_location="cpu"))
+        lstm_model.eval()
+        print("✓ LSTM loaded")
     else:
-        print("LSTM model not found.")
+        print("✗ LSTM not found — train first")
 
-    # ---- Load Isolation Forest ----
-    iso_path = os.path.join(BASE_DIR, "isolation_forest.pkl")
+    # Scaler / baseline
+    scaler_path   = os.path.join(MODEL_DIR, "scaler.pkl")
+    baseline_path = os.path.join(MODEL_DIR, "baseline.pkl")
+    if os.path.exists(scaler_path):
+        scaler = joblib.load(scaler_path)
+        print("✓ Scaler loaded")
+    if os.path.exists(baseline_path):
+        baseline = joblib.load(baseline_path)
+        print("✓ Baseline loaded")
 
+    # Isolation Forest
+    iso_path = os.path.join(MODEL_DIR, "isolation_forest.pkl")
     if os.path.exists(iso_path):
         iso_model = joblib.load(iso_path)
-        print("Isolation Forest loaded successfully.")
+        print("✓ Isolation Forest loaded")
     else:
-        print("Isolation Forest model not found.")
+        print("✗ Isolation Forest not found — train first")
 
-    # ---- Load Log Model ----
-    log_path = os.path.join(BASE_DIR, "log_model")
-
+    # Log classifier (TF-IDF + LR)
+    log_path = os.path.join(MODEL_DIR, "log_classifier.pkl")
     if os.path.exists(log_path):
-        log_model = DistilBertForSequenceClassification.from_pretrained(log_path)
-        log_tokenizer = DistilBertTokenizerFast.from_pretrained(log_path)
-        log_model.eval()
-        print("Log classifier loaded successfully.")
+        log_classifier = joblib.load(log_path)
+        print("✓ Log classifier loaded")
     else:
-        print("Log model not found.")
+        print("✗ Log classifier not found — train first")
+
+load_models()
 
 
-@app.on_event("startup")
-def startup_event():
-    load_models()
-
-
-# ───────────────────────── Health ─────────────────────────
-
-@app.get("/health")
-def health():
-    return {
-        "status": "running",
-        "lstm_loaded": model is not None,
-        "iso_loaded": iso_model is not None,
-        "log_loaded": log_model is not None
-    }
-
-# ───────────────────────── Predict (LSTM) ─────────────────────────
-
+# ── Schemas ───────────────────────────────────────────────────
 class PredictRequest(BaseModel):
-    data: List[List[float]]
-
-
-@app.post("/predict")
-def predict(request: PredictRequest):
-
-    if model is None or scaler is None:
-        raise HTTPException(status_code=503, detail="LSTM model not trained")
-
-    arr = np.array(request.data)
-
-    if arr.ndim != 2:
-        raise HTTPException(status_code=422, detail="Input must be 2D array")
-
-    if arr.shape[0] != INPUT_WINDOW:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Expected {INPUT_WINDOW} rows"
-        )
-
-    if arr.shape[1] != len(FEATURES):
-        raise HTTPException(
-            status_code=422,
-            detail=f"Expected {len(FEATURES)} features"
-        )
-
-    arr_scaled = scaler.transform(arr)
-
-    with torch.no_grad():
-        inp = torch.tensor(arr_scaled, dtype=torch.float32).unsqueeze(0)
-        pred = model(inp)
-        pred = pred.reshape(OUTPUT_WINDOW, len(FEATURES))
-        pred = scaler.inverse_transform(pred.numpy())
-
-    return {
-        "prediction": pred.tolist(),
-        "features": FEATURES,
-        "output_window": OUTPUT_WINDOW,
-    }
-
-
-# ───────────────────────── Anomaly (Isolation Forest) ─────────────────────────
-
-@app.post("/anomaly")
-def detect_anomaly(request: PredictRequest):
-
-    if iso_model is None:
-        raise HTTPException(status_code=503, detail="Isolation model not trained")
-
-    arr = np.array(request.data)
-
-    if arr.ndim != 2:
-        raise HTTPException(status_code=422, detail="Input must be 2D array")
-
-    if arr.shape[1] != len(FEATURES):
-        raise HTTPException(
-            status_code=422,
-            detail=f"Expected {len(FEATURES)} features"
-        )
-
-    flags = iso_model.predict(arr)   # -1 anomaly, 1 normal
-    scores = iso_model.decision_function(arr)
-
-    return {
-        "anomaly_flags": flags.tolist(),
-        "anomaly_scores": scores.tolist()
-    }
-
-# ───────────────────────── Log Classification ─────────────────────────
+    data: List[List[float]]   # shape: (INPUT_WINDOW, num_features)
 
 class LogRequest(BaseModel):
     log_text: str
 
+class EnsembleRequest(BaseModel):
+    metrics_window: List[List[float]]    # (INPUT_WINDOW, num_features)
+    log_text: Optional[str] = ""
 
+class AnomalyRequest(BaseModel):
+    data: List[List[float]]
+
+
+# ── Helpers ───────────────────────────────────────────────────
+def to_zscore(window_np):
+    """Normalize raw metric window using saved baseline."""
+    if baseline is not None:
+        return (window_np - baseline["mean"]) / baseline["std"]
+    elif scaler is not None:
+        return scaler.transform(window_np)
+    return window_np
+
+def from_zscore(zscores):
+    """Convert z-score predictions back to raw values."""
+    if baseline is not None:
+        return zscores * baseline["std"] + baseline["mean"]
+    elif scaler is not None:
+        return scaler.inverse_transform(zscores)
+    return zscores
+
+
+# ── /predict — LSTM forecast ──────────────────────────────────
+@app.post("/predict")
+def predict(request: PredictRequest):
+    if lstm_model is None:
+        raise HTTPException(503, "LSTM model not loaded")
+
+    arr = np.array(request.data, dtype=np.float32)
+    if arr.shape != (INPUT_WINDOW, len(FEATURES)):
+        raise HTTPException(400, f"Expected shape ({INPUT_WINDOW}, {len(FEATURES)}), got {arr.shape}")
+
+    # Normalize → run LSTM → denormalize
+    normalized = to_zscore(arr)
+    inp        = torch.tensor(normalized[np.newaxis, ...], dtype=torch.float32)
+
+    with torch.no_grad():
+        out = lstm_model(inp)  # (1, OUTPUT_WINDOW * num_features)
+
+    z_pred   = out.numpy().reshape(OUTPUT_WINDOW, len(FEATURES))
+    raw_pred = from_zscore(z_pred)
+
+    return {
+        "prediction":    raw_pred.tolist(),
+        "feature_names": FEATURES,
+        "output_window": OUTPUT_WINDOW,
+    }
+
+
+# ── /anomaly — Isolation Forest ───────────────────────────────
+@app.post("/anomaly")
+def detect_anomaly(request: AnomalyRequest):
+    if iso_model is None:
+        raise HTTPException(503, "Isolation Forest not loaded")
+
+    arr   = np.array(request.data, dtype=np.float32)
+    flags = iso_model.predict(arr)           # -1 = anomaly, 1 = normal
+    scores = iso_model.decision_function(arr) # negative = more anomalous
+
+    return {
+        "anomaly_flags":  flags.tolist(),
+        "anomaly_scores": scores.tolist(),
+        "anomaly_count":  int((flags == -1).sum()),
+    }
+
+
+# ── /classify-log — TF-IDF + LR ──────────────────────────────
 @app.post("/classify-log")
 def classify_log(req: LogRequest):
+    if log_classifier is None:
+        raise HTTPException(503, "Log classifier not loaded")
 
-    if log_model is None or log_tokenizer is None:
-        raise HTTPException(status_code=503, detail="Log model not trained")
+    pred  = log_classifier.predict([req.log_text])[0]
+    proba = log_classifier.predict_proba([req.log_text])[0]
 
-    inputs = log_tokenizer(req.log_text, return_tensors="pt")
-
-    with torch.no_grad():
-        outputs = log_model(**inputs)
-
-    probs = torch.softmax(outputs.logits, dim=1)
-    predicted_class = torch.argmax(probs, dim=1).item()
-
-    label_map = {
-        0: "normal",
-        1: "warning",
-        2: "critical"
-    }
-
+    label_map = {0: "normal", 1: "warning", 2: "critical"}
     return {
-        "prediction": label_map[predicted_class],
-        "probabilities": probs.tolist()
+        "prediction":    label_map[pred],
+        "probabilities": {
+            "normal":   float(proba[0]),
+            "warning":  float(proba[1]),
+            "critical": float(proba[2]),
+        }
     }
 
-class EnsembleRequest(BaseModel):
-    metrics_window: List[List[float]]
-    log_text: str
 
+# ── /ensemble — Fusion of all three ──────────────────────────
 @app.post("/ensemble")
 def ensemble_predict(req: EnsembleRequest):
+    if lstm_model is None:
+        raise HTTPException(503, "LSTM model not loaded")
 
-    if model is None or scaler is None:
-        raise HTTPException(status_code=503, detail="LSTM not loaded")
-
-    if iso_model is None:
-        raise HTTPException(status_code=503, detail="Isolation Forest not loaded")
-
-    if log_model is None:
-        raise HTTPException(status_code=503, detail="Log model not loaded")
-
-    arr = np.array(req.metrics_window)
-
-    if arr.shape[0] != INPUT_WINDOW:
-        raise HTTPException(status_code=422, detail="Invalid window size")
-
-    if arr.shape[1] != len(FEATURES):
-        raise HTTPException(status_code=422, detail="Invalid feature size")
-
-    # ----- LSTM Forecast -----
-    arr_scaled = scaler.transform(arr)
+    arr  = np.array(req.metrics_window, dtype=np.float32)
+    norm = to_zscore(arr)
+    inp  = torch.tensor(norm[np.newaxis, ...], dtype=torch.float32)
 
     with torch.no_grad():
-        inp = torch.tensor(arr_scaled, dtype=torch.float32).unsqueeze(0)
-        pred = model(inp)
-        pred = pred.reshape(OUTPUT_WINDOW, len(FEATURES))
-        pred = scaler.inverse_transform(pred.numpy())
+        out = lstm_model(inp)
 
-    future_last = pred[-1]
-    cpu, memory, request_rate, error_rate, latency = future_last
+    z_pred   = out.numpy().reshape(OUTPUT_WINDOW, len(FEATURES))
+    raw_pred = from_zscore(z_pred)
+    worst    = raw_pred[-1]  # final forecast step
 
-    # ----- Isolation Forest -----
-    iso_flag = iso_model.predict([future_last])[0]
+    # Map features
+    feat_idx = {f: i for i, f in enumerate(FEATURES)}
+    cpu         = float(worst[feat_idx.get("cpu", 0)])
+    memory      = float(worst[feat_idx.get("memory", 1)])
+    error_rate  = float(worst[feat_idx.get("error_rate", 3)])
+    latency     = float(worst[feat_idx.get("latency", 4)])
 
-    # ----- Log Model -----
-    inputs = log_tokenizer(req.log_text, return_tensors="pt")
+    # Isolation Forest on forecast
+    iso_flag = 1
+    if iso_model is not None:
+        iso_flag = int(iso_model.predict([worst])[0])
 
-    with torch.no_grad():
-        outputs = log_model(**inputs)
+    # Log classification
+    log_label = "normal"
+    log_proba = {}
+    if log_classifier is not None and req.log_text:
+        log_label = log_classifier.predict([req.log_text])[0]
+        proba     = log_classifier.predict_proba([req.log_text])[0]
+        log_proba = {"normal": float(proba[0]), "warning": float(proba[1]), "critical": float(proba[2])}
+        log_label = ["normal", "warning", "critical"][log_label]
 
-    probs = torch.softmax(outputs.logits, dim=1)
-    log_class = torch.argmax(probs, dim=1).item()
-
-    # ----- Fusion Logic -----
-    severity = "normal"
-
-    if (
-        iso_flag == -1 or
-        log_class == 2 or
-        cpu > 85 or
-        memory > 85 or
-        error_rate > 20 or
-        latency > 300
-    ):
+    # Fusion rules
+    if (iso_flag == -1 or log_label == "critical" or
+            cpu > 85 or memory > 85 or error_rate > 20 or latency > 300):
         severity = "critical"
-
-    elif (
-        log_class == 1 or
-        cpu > 70 or
-        memory > 75 or
-        error_rate > 10 or
-        latency > 200
-    ):
+    elif (log_label == "warning" or
+            cpu > 70 or memory > 75 or error_rate > 10 or latency > 200):
         severity = "warning"
+    else:
+        severity = "normal"
 
     return {
-        "severity": severity,
-        "lstm_forecast": pred.tolist(),
-        "iso_flag": int(iso_flag),
-        "log_prediction": log_class,
-        "log_probabilities": probs.tolist()
+        "severity":        severity,
+        "lstm_prediction": raw_pred.tolist(),
+        "iso_flag":        iso_flag,
+        "log_label":       log_label,
+        "log_proba":       log_proba,
+        "forecast_worst":  {
+            "cpu":         cpu,
+            "memory":      memory,
+            "error_rate":  error_rate,
+            "latency":     latency,
+        },
     }
+
+
+# ── /health ───────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {
+        "status":       "running",
+        "lstm_loaded":  lstm_model    is not None,
+        "iso_loaded":   iso_model     is not None,
+        "log_loaded":   log_classifier is not None,
+        "baseline_loaded": baseline   is not None,
+    }
+
+
+# ── /reload — hot-reload models without restart ───────────────
+@app.post("/reload")
+def reload_models():
+    load_models()
+    return {"status": "reloaded"}

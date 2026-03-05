@@ -1,19 +1,8 @@
-FROM python:3.10-slim
-
+FROM --platform=linux/arm64 python:3.10-slim
 WORKDIR /app
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
 COPY src ./src
 COPY training ./training
-
-
-# Make models dir so volume mount works cleanly
-RUN mkdir -p /app/models
-
-WORKDIR /app/src
-
 EXPOSE 8000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

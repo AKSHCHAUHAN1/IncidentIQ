@@ -1,98 +1,120 @@
+"""
+trainer.py — LSTM training with z-score normalization.
+Saves model.pt, scaler.pkl, AND baseline.pkl (mean/std for z-scoring).
+"""
+
 import sys
 import os
-
-# Add src/ to path so config, model, dataset are importable
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import torch
 import numpy as np
-from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
-from config import *
-from dataset import load_data, create_sequences
-from model import LSTMModel
 import joblib
+
+from config   import FEATURES, INPUT_WINDOW, OUTPUT_WINDOW, EPOCHS, BATCH_SIZE, LEARNING_RATE
+from dataset  import load_data, compute_service_baseline, normalize_zscore, create_sequences
+from model    import LSTMModel
 
 os.makedirs("/app/models", exist_ok=True)
 
 
 def train():
-    print("Loading data from TimescaleDB...")
-    data = load_data()
-    print(f"Loaded {len(data)} rows of data")
+    print("=" * 60)
+    print("  LSTM Training — Z-score Normalization")
+    print("=" * 60)
 
-    scaler = StandardScaler()
-    scaled = scaler.fit_transform(data)
+    # 1. Load raw data
+    print("\n[1/5] Loading data from TimescaleDB...")
+    raw = load_data()
+    print(f"      Loaded {len(raw)} timesteps × {raw.shape[1]} features")
 
-    X, y = create_sequences(scaled)
-    print(f"Created {len(X)} sequences")
+    # 2. Compute service baseline (what "normal" looks like)
+    print("[2/5] Computing service baseline (mean/std per feature)...")
+    mean, std = compute_service_baseline(raw)
+    for i, feat in enumerate(FEATURES):
+        print(f"      {feat:12s}  mean={mean[i]:.2f}  std={std[i]:.2f}")
 
-    split = int(0.8 * len(X))
+    # Save baseline so the prediction endpoint can use it
+    joblib.dump({"mean": mean, "std": std}, "/app/models/baseline.pkl")
+    print("      Baseline saved → /app/models/baseline.pkl")
+
+    # 3. Normalize
+    print("[3/5] Normalizing to z-scores...")
+    normalized = normalize_zscore(raw, mean, std)
+
+    # 4. Create sequences
+    X, y = create_sequences(normalized)
+    print(f"      Created {len(X)} sequences  ({INPUT_WINDOW}→{OUTPUT_WINDOW} steps)")
+
+    # 5. Train/val split
+    split    = int(0.8 * len(X))
     X_train, X_val = X[:split], X[split:]
     y_train, y_val = y[:split], y[split:]
-    print(f"Train: {len(X_train)} | Val: {len(X_val)}")
+    print(f"      Train: {len(X_train)} | Val: {len(X_val)}")
+
+    y_train_flat = y_train.reshape(len(y_train), -1)
+    y_val_flat   = y_val.reshape(len(y_val),   -1)
 
     train_loader = DataLoader(
-        TensorDataset(
-            torch.tensor(X_train, dtype=torch.float32),
-            torch.tensor(y_train.reshape(len(y_train), -1), dtype=torch.float32),
-        ),
-        batch_size=BATCH_SIZE,
-        shuffle=True,
+        TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                      torch.tensor(y_train_flat, dtype=torch.float32)),
+        batch_size=BATCH_SIZE, shuffle=True
     )
-
     val_loader = DataLoader(
-        TensorDataset(
-            torch.tensor(X_val, dtype=torch.float32),
-            torch.tensor(y_val.reshape(len(y_val), -1), dtype=torch.float32),
-        ),
-        batch_size=BATCH_SIZE,
+        TensorDataset(torch.tensor(X_val, dtype=torch.float32),
+                      torch.tensor(y_val_flat, dtype=torch.float32)),
+        batch_size=BATCH_SIZE
     )
 
-    model = LSTMModel(len(FEATURES))
+    # 6. Train
+    print("\n[4/5] Training LSTM...")
+    model     = LSTMModel(len(FEATURES))
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    loss_fn = torch.nn.MSELoss()
+    loss_fn   = torch.nn.MSELoss()
 
-    best_val_loss = float("inf")
-    patience = 5
-    patience_counter = 0
+    best_val  = float("inf")
+    patience  = 5
+    counter   = 0
 
     for epoch in range(EPOCHS):
         model.train()
-        total_train_loss = 0
-        for xb, yb in train_loader:
-            pred = model(xb)
-            loss = loss_fn(pred, yb)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_train_loss += loss.item()
-        avg_train_loss = total_train_loss / len(train_loader)
+        train_loss = sum(
+            (lambda pred: loss_fn(pred, yb))(model(xb))
+            for xb, yb in train_loader
+        ) / len(train_loader)
 
         model.eval()
-        total_val_loss = 0
+        val_loss = 0
         with torch.no_grad():
             for xb, yb in val_loader:
-                pred = model(xb)
-                total_val_loss += loss_fn(pred, yb).item()
-        avg_val_loss = total_val_loss / len(val_loader)
+                val_loss += loss_fn(model(xb), yb).item()
+        val_loss /= len(val_loader)
 
-        print(f"Epoch {epoch+1:02d}/{EPOCHS} | train_loss={avg_train_loss:.4f} | val_loss={avg_val_loss:.4f}")
+        print(f"  Epoch {epoch+1:02d}/{EPOCHS}  train={train_loss:.4f}  val={val_loss:.4f}")
 
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        if val_loss < best_val:
+            best_val = val_loss
             torch.save(model.state_dict(), "/app/models/model.pt")
-            joblib.dump(scaler, "/app/models/scaler.pkl")
-            patience_counter = 0
-            print(f"  ✓ Best model saved (val_loss={best_val_loss:.4f})")
+            counter = 0
+            print(f"  ✓ Best model saved (val={best_val:.4f})")
         else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
+            counter += 1
+            if counter >= patience:
+                print(f"  Early stopping at epoch {epoch+1}")
                 break
 
-    print(f"\nTraining complete. Best val_loss={best_val_loss:.4f}")
-    print("Model saved to /app/models/model.pt")
+    # 7. Save a StandardScaler-compatible object so main.py still works
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    scaler.mean_ = mean
+    scaler.scale_ = std
+    scaler.var_   = std ** 2
+    scaler.n_features_in_ = len(FEATURES)
+    joblib.dump(scaler, "/app/models/scaler.pkl")
+
+    print(f"\n[5/5] Done. Best val_loss={best_val:.4f}")
+    print("Saved: model.pt  scaler.pkl  baseline.pkl")
 
 
 if __name__ == "__main__":

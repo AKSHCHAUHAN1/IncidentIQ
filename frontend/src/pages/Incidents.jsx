@@ -1,13 +1,17 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, X, Loader, CheckCircle2, XCircle } from 'lucide-react';
+import { Search, X, Loader, CheckCircle2, XCircle, GitMerge } from 'lucide-react';
 import { api } from '../lib/api';
 
+const BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+
 export default function Incidents() {
-  const [searchTerm, setSearchTerm]             = useState('');
-  const [selectedIncident, setSelectedIncident] = useState(null);
-  const [incidents, setIncidents]               = useState([]);
-  const [loading, setLoading]                   = useState(true);
+  const [searchTerm, setSearchTerm]               = useState('');
+  const [selectedIncident, setSelectedIncident]   = useState(null);
+  const [incidents, setIncidents]                 = useState([]);
+  const [loading, setLoading]                     = useState(true);
+  const [similar, setSimilar]                     = useState([]);
+  const [similarLoading, setSimilarLoading]       = useState(false);
 
   useEffect(() => {
     api.incidents({ limit: 100 })
@@ -16,20 +20,32 @@ export default function Incidents() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Fetch similar incidents when one is selected
+  useEffect(() => {
+    if (!selectedIncident) { setSimilar([]); return; }
+    setSimilarLoading(true);
+    const token = localStorage.getItem('iq_token') || '';
+    fetch(`${BASE}/api/incidents/${selectedIncident.id}/similar`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then(d => setSimilar(d.similar || []))
+      .catch(() => setSimilar([]))
+      .finally(() => setSimilarLoading(false));
+  }, [selectedIncident?.id]);
+
   const filteredIncidents = useMemo(() =>
     incidents.filter(inc =>
       inc.service_id?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       inc.id?.toLowerCase().includes(searchTerm.toLowerCase())
     ), [incidents, searchTerm]);
 
-  // Map DB fields → display
   const displayStatus = (inc) => {
     if (inc.remediation_status === 'success' || inc.status === 'prevented') return 'Success';
     if (inc.remediation_status === 'failed'  || inc.status === 'occurred')  return 'Failed';
     return 'Pending';
   };
 
-  // ── Exact reference replica status pills ─────────────────────
   const StatusPill = ({ status }) => {
     if (status === 'Pending') return (
       <div className="status-badge-ref status-badge-warning">
@@ -61,7 +77,7 @@ export default function Incidents() {
     <motion.main initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       className="relative z-10 pt-32 px-10 max-w-7xl mx-auto flex">
 
-      <div className={`flex-1 transition-all duration-500 ${selectedIncident ? 'pr-[400px]' : ''}`}>
+      <div className={`flex-1 transition-all duration-500 ${selectedIncident ? 'pr-[440px]' : ''}`}>
         <div className="flex justify-between items-end mb-8">
           <h1 className="text-3xl font-bold tracking-tighter">Incident Registry</h1>
           <div className="relative group metal-container-static w-72" style={{ '--m-radius': '9999px', '--m-border': '1px' }}>
@@ -86,14 +102,14 @@ export default function Incidents() {
             </thead>
             <motion.tbody variants={tableVars} initial="hidden" animate="show" className="divide-y divide-white/5">
               {loading ? (
-                <tr><td colSpan="4" className="text-center py-10 text-gray-500 font-mono">Loading incidents...</td></tr>
+                <tr><td colSpan="4" className="text-center py-10 text-gray-500 font-mono animate-pulse">Loading incidents...</td></tr>
               ) : filteredIncidents.length === 0 ? (
                 <tr><td colSpan="4" className="text-center py-10 text-gray-500">
-                  {searchTerm ? `No incidents found matching "${searchTerm}"` : 'No incidents recorded — system healthy 🎉'}
+                  {searchTerm ? `No incidents matching "${searchTerm}"` : 'No incidents recorded — system healthy 🎉'}
                 </td></tr>
               ) : filteredIncidents.map(inc => (
                 <motion.tr variants={rowVars} key={inc.id} onClick={() => setSelectedIncident(inc)}
-                  className="hover:bg-white/5 cursor-pointer transition-colors group">
+                  className={`hover:bg-white/5 cursor-pointer transition-colors group ${selectedIncident?.id === inc.id ? 'bg-white/5' : ''}`}>
                   <td className="p-4"><StatusPill status={displayStatus(inc)} /></td>
                   <td className="p-4 font-mono text-gray-300 group-hover:text-white transition-colors text-xs">{inc.id}</td>
                   <td className="p-4 text-gray-300">{inc.service_id}</td>
@@ -111,49 +127,48 @@ export default function Incidents() {
         </div>
       </div>
 
-      {/* Slide-over — exact design from your original */}
+      {/* Slide-over panel */}
       <AnimatePresence>
         {selectedIncident && (
           <motion.div
             initial={{ x: '100%', opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: '100%', opacity: 0 }}
             transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-            className="fixed top-0 right-0 w-[400px] h-full bg-[#0a0c10]/95 backdrop-blur-2xl border-l border-white/10 z-50 p-8 overflow-y-auto shadow-[-20px_0_50px_rgba(0,0,0,0.5)]">
+            className="fixed top-0 right-0 w-[440px] h-full bg-[#0a0c10]/95 backdrop-blur-2xl border-l border-white/10 z-50 p-8 overflow-y-auto shadow-[-20px_0_50px_rgba(0,0,0,0.5)]">
+
             <button onClick={() => setSelectedIncident(null)}
               className="absolute top-6 right-6 text-gray-500 hover:text-white bg-white/5 rounded-full p-2 transition-all">
               <X className="w-4 h-4" />
             </button>
+
             <h2 className="text-2xl font-bold mt-10 mb-2 tracking-tighter text-white font-mono">{selectedIncident.id}</h2>
             <p className="text-sm text-gray-400 font-mono border-b border-white/10 pb-6 mb-6">
               {selectedIncident.service_id} • {new Date(selectedIncident.predicted_at).toLocaleString()}
             </p>
+
             <div className="space-y-6">
               <div>
                 <h4 className="text-xs text-gray-500 uppercase tracking-widest font-mono mb-3">Current Status</h4>
                 <StatusPill status={displayStatus(selectedIncident)} />
               </div>
+
               <div>
                 <h4 className="text-xs text-gray-500 uppercase tracking-widest font-mono mb-3">Details</h4>
                 <div className="replica-3d-item p-4 space-y-2 font-mono text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Severity</span>
-                    <span className={selectedIncident.severity === 'critical' ? 'text-red-400' : 'text-amber-400'}>{selectedIncident.severity}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Confidence</span>
-                    <span className="text-white">{selectedIncident.confidence ? `${(selectedIncident.confidence * 100).toFixed(1)}%` : '—'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Action</span>
-                    <span className="text-white">{selectedIncident.remediation_action || '—'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Auto-executed</span>
-                    <span className={selectedIncident.auto_executed ? 'text-green-400' : 'text-gray-400'}>
-                      {selectedIncident.auto_executed ? 'Yes' : 'No'}
-                    </span>
-                  </div>
+                  {[
+                    ["Severity",     <span className={selectedIncident.severity === 'critical' ? 'text-red-400' : 'text-amber-400'}>{selectedIncident.severity}</span>],
+                    ["Confidence",   selectedIncident.confidence ? `${(selectedIncident.confidence * 100).toFixed(1)}%` : '—'],
+                    ["Action",       selectedIncident.remediation_action || '—'],
+                    ["Auto-executed", selectedIncident.auto_executed ? <span className="text-green-400">Yes</span> : <span className="text-gray-400">No</span>],
+                  ].map(([k, v]) => (
+                    <div key={k} className="flex justify-between">
+                      <span className="text-gray-500">{k}</span>
+                      <span className="text-white">{v}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
+
+              {/* Metrics snapshot */}
               {selectedIncident.metrics_snapshot && (
                 <div>
                   <h4 className="text-xs text-gray-500 uppercase tracking-widest font-mono mb-3">Metrics Snapshot</h4>
@@ -161,12 +176,42 @@ export default function Incidents() {
                     {Object.entries(selectedIncident.metrics_snapshot).map(([k, v]) => (
                       <div key={k} className="flex justify-between">
                         <span className="text-gray-500">{k}</span>
-                        <span className="text-white">{typeof v === 'number' ? v.toFixed(2) : v}</span>
+                        <span className={typeof v === 'number' && v > 80 ? 'text-red-400' : 'text-white'}>
+                          {typeof v === 'number' ? v.toFixed(2) : v}
+                        </span>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
+
+              {/* Similar incidents — pgvector */}
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <GitMerge size={12} className="text-indigo-400" />
+                  <h4 className="text-xs text-gray-500 uppercase tracking-widest font-mono">Similar Past Incidents</h4>
+                </div>
+                {similarLoading ? (
+                  <p className="text-gray-600 text-xs font-mono animate-pulse">Searching vector database...</p>
+                ) : similar.length === 0 ? (
+                  <p className="text-gray-600 text-xs font-mono">No similar incidents found yet</p>
+                ) : similar.map(s => (
+                  <div key={s.id} onClick={() => setSelectedIncident(s)}
+                    className="replica-3d-item p-3 mb-2 cursor-pointer hover:border-indigo/30 transition-colors">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-mono text-xs text-indigo-400">{s.id}</span>
+                      <span className="text-xs font-mono text-green-400 font-bold">{s.similarity_pct}% match</span>
+                    </div>
+                    <div className="flex gap-2 text-xs text-gray-500">
+                      <span>{s.service_id}</span>
+                      <span>•</span>
+                      <span className={s.severity === 'critical' ? 'text-red-400' : 'text-amber-400'}>{s.severity}</span>
+                      <span>•</span>
+                      <span>{s.status}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </motion.div>
         )}

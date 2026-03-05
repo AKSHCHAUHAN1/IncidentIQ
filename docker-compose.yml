@@ -1,163 +1,152 @@
 services:
 
+  # ── Infrastructure ──────────────────────────────────────────
   postgres:
-    image: timescale/timescaledb-ha:pg16
+    image: timescale/timescaledb:latest-pg15
+    platform: linux/arm64
     environment:
-      POSTGRES_USER: postgres
+      POSTGRES_USER:     postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: incident_predictor
+      POSTGRES_DB:       incident_predictor
     volumes:
-      - pg_data:/var/lib/postgresql/data
-      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01_init.sql
     ports:
       - "5432:5432"
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     ports:
       - "6379:6379"
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
 
-  victoria-metrics:
-    image: victoriametrics/victoria-metrics
-    ports:
-      - "8428:8428"
-    command:
-      - "-retentionPeriod=7"
-    restart: unless-stopped
-
-  prometheus:
-    image: prom/prometheus
-    volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-    ports:
-      - "9090:9090"
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana
-    ports:
-      - "3001:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+  # ── Website probe — scans URLs added via frontend ───────────
+  website-probe:
+    build:
+      context: ./services/website-probe
+      dockerfile: Dockerfile
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      REDIS_HOST: redis
+      DB_HOST:    postgres
+      DB_USER:    postgres
+      DB_PASSWORD: postgres
+      DB_NAME:    incident_predictor
+    depends_on:
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
     restart: unless-stopped
 
+  # ── Synthetic generator — ONLY for development/testing ──────
+  # Switch MODE: spike to test the approval flow
+  # Switch MODE: mixed to simulate realistic degradation
+  # DISABLE in production by removing this service
   synthetic-generator:
-    build: ./services/synthetic-generator
+    build:
+      context: ./services/synthetic-generator
+      dockerfile: Dockerfile
     environment:
       REDIS_HOST: redis
-      MODE: spike          # normal=training data | spike=test remediation
+      MODE: mixed   # normal | spike | ramp | mixed
     depends_on:
-      - redis
+      redis: { condition: service_healthy }
     restart: unless-stopped
+    profiles:
+      - dev   # only starts with: docker compose --profile dev up
 
-  prometheus-producer:
-    build: ./services/prometheus-producer
-    environment:
-      REDIS_HOST: redis
-      PROMETHEUS_URL: http://prometheus:9090
-    depends_on:
-      - redis
-      - prometheus
-    restart: unless-stopped
-
+  # ── Data ingestion ───────────────────────────────────────────
   data-ingestion:
-    build: ./services/data-ingestion
+    build:
+      context: ./services/data-ingestion
+      dockerfile: Dockerfile
     environment:
       REDIS_HOST: redis
-      POSTGRES_HOST: postgres
-      VICTORIA_URL: http://victoria-metrics:8428
-      ML_URL: http://ml-service:8000/predict
-      DECISION_URL: http://decision-engine:5000/evaluate
-      INPUT_WINDOW: 20
-    ports:
-      - "4000:4000"
+      DB_HOST:    postgres
+      DB_USER:    postgres
+      DB_PASSWORD: postgres
+      DB_NAME:    incident_predictor
     depends_on:
-      - redis
-      - postgres
-      - ml-service
-      - decision-engine
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
     restart: unless-stopped
 
+  # ── ML Service ───────────────────────────────────────────────
   ml-service:
-    platform: linux/amd64
     build:
       context: ./services/ml-service
-    ports:
-      - "8000:8000"
+      dockerfile: Dockerfile
     environment:
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_NAME=incident_predictor
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
+      DB_HOST:     postgres
+      DB_USER:     postgres
+      DB_PASSWORD: postgres
+      DB_NAME:     incident_predictor
     volumes:
       - ml_models:/app/models
+    ports:
+      - "8000:8000"
     depends_on:
-      - postgres
+      postgres: { condition: service_healthy }
     restart: unless-stopped
 
+  # ── Decision Engine ──────────────────────────────────────────
   decision-engine:
-    build: ./services/decision-engine
-    container_name: decision-engine
-    ports:
-      - "5000:5000"
+    build:
+      context: ./services/decision-engine
+      dockerfile: Dockerfile
     environment:
-      REMEDIATION_URL: http://remediation-engine:6000/act
+      REDIS_HOST:      redis
+      DB_HOST:         postgres
+      DB_USER:         postgres
+      DB_PASSWORD:     postgres
+      DB_NAME:         incident_predictor
+      ML_SERVICE_URL:  http://ml-service:8000
       API_GATEWAY_URL: http://api-gateway:3000
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: incident_predictor
-      DB_USER: postgres
-      DB_PASSWORD: postgres
+      REMEDIATION_URL: http://remediation-engine:4000
     depends_on:
-      - postgres
-      - remediation-engine
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
     restart: unless-stopped
 
+  # ── Remediation Engine ───────────────────────────────────────
   remediation-engine:
-    build: ./services/remediation-engine
-    container_name: remediation-engine
-    ports:
-      - "6000:6000"
+    build:
+      context: ./services/remediation-engine
+      dockerfile: Dockerfile
     environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: incident_predictor
-      DB_USER: postgres
+      DB_HOST:     postgres
+      DB_USER:     postgres
       DB_PASSWORD: postgres
-    privileged: true
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      DB_NAME:     incident_predictor
     depends_on:
-      - postgres
+      postgres: { condition: service_healthy }
     restart: unless-stopped
 
+  # ── API Gateway ──────────────────────────────────────────────
   api-gateway:
-    build: ./services/api-gateway
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    environment:
+      DB_HOST:     postgres
+      DB_USER:     postgres
+      DB_PASSWORD: postgres
+      DB_NAME:     incident_predictor
+      JWT_SECRET:  change-this-in-production
+      PORT:        3000
     ports:
       - "3000:3000"
-    environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: incident_predictor
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      REMEDIATION_URL: http://remediation-engine:6000
-      JWT_SECRET: incidentiq-dev-secret
-      PORT: 3000
     depends_on:
-      - postgres
-      - remediation-engine
-      - decision-engine
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
     restart: unless-stopped
 
 volumes:
-  pg_data:
-  grafana_data:
-  ml_models:
+  postgres_data:
+  ml_models:      # persists trained models across rebuilds

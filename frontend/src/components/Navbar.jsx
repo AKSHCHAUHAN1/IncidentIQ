@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, GitBranch, History, ShieldAlert } from 'lucide-react';
+import { Activity, GitBranch, History, ShieldAlert, BarChart2, Globe } from 'lucide-react';
 import { socket } from '../socket';
 import { api } from '../lib/api';
 
@@ -19,22 +19,29 @@ export default function Navbar() {
     refreshCount();
     const onScroll = () => setScrolled(window.scrollY > 20);
     window.addEventListener('scroll', onScroll);
-
-    // Real socket events from backend
     socket.on('approval_needed',  () => setPendingApprovals(p => p + 1));
     socket.on('remediation_done', refreshCount);
-
-    // Fallback poll every 30s
     const t = setInterval(refreshCount, 30_000);
-    return () => { window.removeEventListener('scroll', onScroll); socket.off('approval_needed'); socket.off('remediation_done'); clearInterval(t); };
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      socket.off('approval_needed');
+      socket.off('remediation_done');
+      clearInterval(t);
+    };
   }, []);
 
   const NavItem = ({ icon, label, path, badge, isCritical }) => {
     const active = location.pathname === path;
     return (
-      <Link to={path} className={`flex items-center gap-2 transition-all hover:text-white ${active ? 'text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]' : ''} ${isCritical && badge > 0 ? 'text-red-400' : ''}`}>
+      <Link to={path} className={`flex items-center gap-2 transition-all hover:text-white text-sm font-semibold
+        ${active ? 'text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]' : 'text-gray-400'}
+        ${isCritical && badge > 0 ? 'text-red-400' : ''}`}>
         {icon} <span>{label}</span>
-        {badge > 0 && <span className="bg-red-500/20 border border-red-500/30 text-red-500 text-xs px-2 py-0.5 rounded-full font-bold">{badge}</span>}
+        {badge > 0 && (
+          <span className="bg-red-500/20 border border-red-500/30 text-red-500 text-xs px-2 py-0.5 rounded-full font-bold">
+            {badge}
+          </span>
+        )}
       </Link>
     );
   };
@@ -48,7 +55,7 @@ export default function Navbar() {
         <motion.nav initial={{ y: -100 }} animate={{ y: 0 }}
           style={{ '--m-radius': '9999px', '--m-border': '1px' }}
           className={`pointer-events-auto transition-all duration-700 metal-container ${scrolled ? 'shadow-[0_20px_50px_rgba(0,0,0,0.9)]' : 'shadow-lg'}`}>
-          <div className="metal-surface px-10 py-4 flex items-center gap-8">
+          <div className="metal-surface px-8 py-4 flex items-center gap-6">
             <div className="relative group flex items-center justify-center">
               <div className="absolute -inset-2 bg-indigo-500/30 blur-[12px] rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-0 pointer-events-none" />
               <Link to="/" className="incident-logo-gradient text-2xl tracking-widest hover:scale-105 transition-transform duration-300 z-10"
@@ -56,12 +63,14 @@ export default function Navbar() {
                 IncidentIQ
               </Link>
             </div>
-            <div className="w-[1px] h-8 bg-white/20 mx-2" />
-            <div className="flex items-center gap-8 text-base text-gray-400 font-semibold">
-              <NavItem icon={<Activity size={20}/>}    label="Dashboard"   path="/" />
-              <NavItem icon={<GitBranch size={20}/>}   label="Predictions" path="/predictions" />
-              <NavItem icon={<History size={20}/>}     label="Incidents"   path="/incidents" />
-              <NavItem icon={<ShieldAlert size={20}/>} label="Approvals"   path="/approvals" badge={pendingApprovals} isCritical />
+            <div className="w-[1px] h-8 bg-white/20 mx-1" />
+            <div className="flex items-center gap-5">
+              <NavItem icon={<Activity size={16}/>}    label="Dashboard"   path="/" />
+              <NavItem icon={<Globe size={16}/>}       label="Monitor"     path="/monitor" />
+              <NavItem icon={<GitBranch size={16}/>}   label="Predictions" path="/predictions" />
+              <NavItem icon={<History size={16}/>}     label="Incidents"   path="/incidents" />
+              <NavItem icon={<ShieldAlert size={16}/>} label="Approvals"   path="/approvals" badge={pendingApprovals} isCritical />
+              <NavItem icon={<BarChart2 size={16}/>}   label="Analytics"   path="/analytics" />
             </div>
           </div>
         </motion.nav>
