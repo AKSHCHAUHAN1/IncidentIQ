@@ -100,12 +100,12 @@ export default function Incidents() {
                 <th className="p-5 font-medium text-right">Severity</th>
               </tr>
             </thead>
-            <motion.tbody variants={tableVars} initial="hidden" animate="show" className="divide-y divide-white/5">
+            <motion.tbody key={loading ? 'loading' : 'loaded'} variants={tableVars} initial="hidden" animate="show" className="divide-y divide-white/5">
               {loading ? (
                 <tr><td colSpan="4" className="text-center py-10 text-gray-500 font-mono animate-pulse">Loading incidents...</td></tr>
               ) : filteredIncidents.length === 0 ? (
                 <tr><td colSpan="4" className="text-center py-10 text-gray-500">
-                  {searchTerm ? `No incidents matching "${searchTerm}"` : 'No incidents recorded — system healthy 🎉'}
+                  {searchTerm ? `No incidents matching "${searchTerm}"` : 'No incidents recorded — system healthy'}
                 </td></tr>
               ) : filteredIncidents.map(inc => (
                 <motion.tr variants={rowVars} key={inc.id} onClick={() => setSelectedIncident(inc)}

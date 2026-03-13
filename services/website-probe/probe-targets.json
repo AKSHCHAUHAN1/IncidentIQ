@@ -1,0 +1,125 @@
+{
+  "_comment": "All URLs have public Atlassian Statuspage APIs. Incidents from these pages are used to label probe data with real ground truth.",
+  "targets": [
+    {
+      "name": "GitHub",
+      "probe_url": "https://github.com",
+      "status_page_api": "https://www.githubstatus.com/api/v2/incidents.json",
+      "status_page_summary": "https://www.githubstatus.com/api/v2/summary.json"
+    },
+    {
+      "name": "Stripe",
+      "probe_url": "https://stripe.com",
+      "status_page_api": "https://status.stripe.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.stripe.com/api/v2/summary.json"
+    },
+    {
+      "name": "Cloudflare",
+      "probe_url": "https://www.cloudflare.com",
+      "status_page_api": "https://www.cloudflarestatus.com/api/v2/incidents.json",
+      "status_page_summary": "https://www.cloudflarestatus.com/api/v2/summary.json"
+    },
+    {
+      "name": "Vercel",
+      "probe_url": "https://vercel.com",
+      "status_page_api": "https://www.vercel-status.com/api/v2/incidents.json",
+      "status_page_summary": "https://www.vercel-status.com/api/v2/summary.json"
+    },
+    {
+      "name": "npm",
+      "probe_url": "https://www.npmjs.com",
+      "status_page_api": "https://status.npmjs.org/api/v2/incidents.json",
+      "status_page_summary": "https://status.npmjs.org/api/v2/summary.json"
+    },
+    {
+      "name": "Twilio",
+      "probe_url": "https://www.twilio.com",
+      "status_page_api": "https://status.twilio.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.twilio.com/api/v2/summary.json"
+    },
+    {
+      "name": "Atlassian",
+      "probe_url": "https://www.atlassian.com",
+      "status_page_api": "https://jira-software.status.atlassian.com/api/v2/incidents.json",
+      "status_page_summary": "https://jira-software.status.atlassian.com/api/v2/summary.json"
+    },
+    {
+      "name": "Shopify",
+      "probe_url": "https://www.shopify.com",
+      "status_page_api": "https://www.shopifystatus.com/api/v2/incidents.json",
+      "status_page_summary": "https://www.shopifystatus.com/api/v2/summary.json"
+    },
+    {
+      "name": "Datadog",
+      "probe_url": "https://www.datadoghq.com",
+      "status_page_api": "https://status.datadoghq.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.datadoghq.com/api/v2/summary.json"
+    },
+    {
+      "name": "PagerDuty",
+      "probe_url": "https://www.pagerduty.com",
+      "status_page_api": "https://status.pagerduty.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.pagerduty.com/api/v2/summary.json"
+    },
+    {
+      "name": "Heroku",
+      "probe_url": "https://www.heroku.com",
+      "status_page_api": "https://status.heroku.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.heroku.com/api/v2/summary.json"
+    },
+    {
+      "name": "Zendesk",
+      "probe_url": "https://www.zendesk.com",
+      "status_page_api": "https://status.zendesk.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.zendesk.com/api/v2/summary.json"
+    },
+    {
+      "name": "Intercom",
+      "probe_url": "https://www.intercom.com",
+      "status_page_api": "https://www.intercomstatus.com/api/v2/incidents.json",
+      "status_page_summary": "https://www.intercomstatus.com/api/v2/summary.json"
+    },
+    {
+      "name": "HubSpot",
+      "probe_url": "https://www.hubspot.com",
+      "status_page_api": "https://status.hubspot.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.hubspot.com/api/v2/summary.json"
+    },
+    {
+      "name": "Fastly",
+      "probe_url": "https://www.fastly.com",
+      "status_page_api": "https://status.fastly.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.fastly.com/api/v2/summary.json"
+    },
+    {
+      "name": "Sendgrid",
+      "probe_url": "https://sendgrid.com",
+      "status_page_api": "https://status.sendgrid.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.sendgrid.com/api/v2/summary.json"
+    },
+    {
+      "name": "Okta",
+      "probe_url": "https://www.okta.com",
+      "status_page_api": "https://status.okta.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.okta.com/api/v2/summary.json"
+    },
+    {
+      "name": "Auth0",
+      "probe_url": "https://auth0.com",
+      "status_page_api": "https://status.auth0.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.auth0.com/api/v2/summary.json"
+    },
+    {
+      "name": "Netlify",
+      "probe_url": "https://www.netlify.com",
+      "status_page_api": "https://www.netlifystatus.com/api/v2/incidents.json",
+      "status_page_summary": "https://www.netlifystatus.com/api/v2/summary.json"
+    },
+    {
+      "name": "DigitalOcean",
+      "probe_url": "https://www.digitalocean.com",
+      "status_page_api": "https://status.digitalocean.com/api/v2/incidents.json",
+      "status_page_summary": "https://status.digitalocean.com/api/v2/summary.json"
+    }
+  ]
+}

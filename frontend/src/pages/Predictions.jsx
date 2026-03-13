@@ -1,195 +1,207 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ShieldAlert, CheckCircle, RefreshCw } from 'lucide-react';
+import { GitBranch, RefreshCw, TrendingUp, AlertTriangle, CheckCircle } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { socket } from '../socket';
-import MagicButton from '../components/MagicButton';
 import { api } from '../lib/api';
 
-export default function Approvals() {
-  const [approvals, setApprovals]   = useState([]);
-  const [loading, setLoading]       = useState(true);
-  const [processing, setProcessing] = useState({}); // id → 'approving'|'rejecting'|'done'
-  const [reasons, setReasons]       = useState({});  // id → rejection reason string
+const FEATURES = ['ttfb_ms', 'dns_ms', 'error_rate', 'ssl_days_left'];
 
-  async function fetchApprovals() {
+const severityConfig = {
+  critical: { color: 'text-red-400', border: 'border-red-500/30 bg-red-500/5', icon: <AlertTriangle size={16} className="text-red-400" /> },
+  warning:  { color: 'text-amber-400', border: 'border-amber-500/30 bg-amber-500/5', icon: <AlertTriangle size={16} className="text-amber-400" /> },
+  normal:   { color: 'text-green-400', border: 'border-green-500/30 bg-green-500/5', icon: <CheckCircle size={16} className="text-green-400" /> },
+};
+
+function PredictionCard({ prediction }) {
+  const [expanded, setExpanded] = useState(false);
+  const conf = prediction.confidence ? (prediction.confidence * 100).toFixed(1) : '—';
+  const cfg = severityConfig[prediction.severity] || severityConfig.normal;
+  const predData = prediction.prediction_data;
+
+  // Build chart data from LSTM forecast if available
+  const chartData = [];
+  if (predData?.prediction?.length) {
+    predData.prediction.forEach((step, i) => {
+      const row = { step: `T+${i + 1}` };
+      FEATURES.forEach((f, fi) => {
+        row[f] = typeof step[fi] === 'number' ? parseFloat(step[fi].toFixed(1)) : 0;
+      });
+      chartData.push(row);
+    });
+  }
+
+  return (
+    <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+      className={`replica-3d-item p-5 cursor-pointer transition-all ${cfg.border}`}
+      onClick={() => setExpanded(e => !e)}>
+
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3 min-w-0">
+          {cfg.icon}
+          <div className="min-w-0">
+            <p className="font-semibold text-white text-sm truncate">{prediction.service_id}</p>
+            <p className="text-xs text-gray-500 font-mono">
+              {new Date(prediction.created_at).toLocaleString()}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 shrink-0 ml-3">
+          <span className={`px-2 py-0.5 rounded text-xs border font-mono font-bold ${cfg.color} ${cfg.border}`}>
+            {prediction.severity?.toUpperCase()}
+          </span>
+          <span className="text-xs font-mono text-gray-400">{conf}%</span>
+        </div>
+      </div>
+
+      <AnimatePresence>
+        {expanded && (
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+            className="mt-4 pt-4 border-t border-white/5 overflow-hidden">
+
+            {/* Forecast chart */}
+            {chartData.length > 0 ? (
+              <div className="mb-4">
+                <p className="text-xs text-gray-500 font-mono mb-2">LSTM Forecast (next {chartData.length} steps)</p>
+                <ResponsiveContainer width="100%" height={160}>
+                  <LineChart data={chartData}>
+                    <XAxis dataKey="step" stroke="#64748b" tick={{ fill: '#64748b', fontSize: 10 }} />
+                    <YAxis stroke="#64748b" tick={{ fill: '#64748b', fontSize: 10 }} />
+                    <Tooltip contentStyle={{ backgroundColor: 'rgba(15,17,23,0.95)', borderColor: 'rgba(255,255,255,0.1)', fontSize: 10 }} />
+                    <ReferenceLine y={2000} stroke="#ef4444" strokeDasharray="3 3" label="" />
+                    <Line type="monotone" dataKey="ttfb_ms" stroke="#6366f1" strokeWidth={1.5} dot={false} name="TTFB ms" />
+                    <Line type="monotone" dataKey="dns_ms" stroke="#06b6d4" strokeWidth={1.5} dot={false} name="DNS ms" />
+                    <Line type="monotone" dataKey="error_rate" stroke="#f59e0b" strokeWidth={1} dot={false} name="Error Rate %" strokeDasharray="4 2" />
+                    <Line type="monotone" dataKey="ssl_days_left" stroke="#22c55e" strokeWidth={1} dot={false} name="SSL days" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-600 font-mono mb-4">No forecast data available</p>
+            )}
+
+            {/* Prediction details */}
+            <div className="grid grid-cols-2 gap-3 font-mono text-xs">
+              <div className="replica-3d-item p-3">
+                <span className="text-gray-500">Model</span>
+                <p className="text-white font-bold">{prediction.model_name || 'ensemble'}</p>
+              </div>
+              <div className="replica-3d-item p-3">
+                <span className="text-gray-500">Outcome</span>
+                <p className={`font-bold ${prediction.outcome === 'true_positive' || prediction.outcome === 'prevented' ? 'text-green-400' : prediction.outcome === 'false_positive' ? 'text-red-400' : 'text-gray-400'}`}>
+                  {prediction.outcome || 'pending'}
+                </p>
+              </div>
+                <div className="replica-3d-item p-3 col-span-2">
+                  <span className="text-gray-500">Root Cause</span>
+                  <p className="text-white font-bold">{(prediction.prediction_data?.root_cause || 'normal').replace(/_/g, ' ')}</p>
+                  {prediction.prediction_data?.breach_eta_min && (
+                    <p className="text-amber-400 text-[11px] mt-1">SLA breach ETA: {prediction.prediction_data.breach_eta_min} min</p>
+                  )}
+                </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
+
+export default function Predictions() {
+  const [predictions, setPredictions] = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [filter, setFilter]           = useState('all');
+
+  async function fetchPredictions() {
     try {
-      const d = await api.approvals('pending');
-      setApprovals(d.approvals || []);
+      const params = { limit: 100 };
+      if (filter !== 'all') params.severity = filter;
+      const d = await api.predictions(params);
+      setPredictions(d.predictions || []);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   }
 
   useEffect(() => {
-    fetchApprovals();
-    socket.on('approval_needed', fetchApprovals);
-    return () => socket.off('approval_needed');
-  }, []);
+    fetchPredictions();
+    socket.on('prediction', () => fetchPredictions());
+    return () => socket.off('prediction');
+  }, [filter]);
 
-  async function handleApprove(approval) {
-    setProcessing(p => ({ ...p, [approval.id]: 'approving' }));
-    try {
-      await api.approve(approval.id);
-      setProcessing(p => ({ ...p, [approval.id]: 'done' }));
-      // Remove from list after showing success state
-      setTimeout(() => {
-        setApprovals(prev => prev.filter(a => a.id !== approval.id));
-        setProcessing(p => { const n = { ...p }; delete n[approval.id]; return n; });
-      }, 2500);
-    } catch (err) {
-      console.error('Approve failed:', err.message);
-      setProcessing(p => ({ ...p, [approval.id]: null }));
-    }
-  }
-
-  async function handleReject(approval) {
-    setProcessing(p => ({ ...p, [approval.id]: 'rejecting' }));
-    try {
-      await api.reject(approval.id, reasons[approval.id] || 'Rejected by operator');
-      setApprovals(prev => prev.filter(a => a.id !== approval.id));
-    } catch (err) {
-      console.error('Reject failed:', err.message);
-      setProcessing(p => ({ ...p, [approval.id]: null }));
-    }
-  }
-
-  if (loading) {
-    return (
-      <motion.main initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-        className="relative z-10 pt-32 px-10 max-w-4xl mx-auto flex items-center justify-center h-[60vh]">
-        <p className="text-gray-500 font-mono uppercase tracking-widest animate-pulse">Loading...</p>
-      </motion.main>
-    );
-  }
-
-  if (approvals.length === 0) {
-    return (
-      <motion.main initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-        className="relative z-10 pt-32 px-10 max-w-4xl mx-auto flex flex-col items-center justify-center h-[60vh] gap-4">
-        <CheckCircle className="text-green-500 w-12 h-12 opacity-50" />
-        <p className="text-gray-500 font-mono uppercase tracking-widest">No pending remediations.</p>
-        <button onClick={fetchApprovals} className="text-xs text-gray-600 hover:text-gray-400 flex items-center gap-2 transition-colors">
-          <RefreshCw size={12} /> Refresh
-        </button>
-      </motion.main>
-    );
-  }
+  const counts = {
+    all:      predictions.length,
+    critical: predictions.filter(p => p.severity === 'critical').length,
+    warning:  predictions.filter(p => p.severity === 'warning').length,
+    normal:   predictions.filter(p => p.severity === 'normal').length,
+  };
 
   return (
     <motion.main initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-      className="relative z-10 pt-32 px-10 max-w-4xl mx-auto pb-20">
+      className="relative z-10 pt-32 px-10 max-w-5xl mx-auto pb-20">
 
-      <div className="flex items-center gap-4 mb-10">
-        <ShieldAlert className="text-amber-500 w-8 h-8 drop-shadow-[0_0_15px_rgba(245,158,11,0.5)]" />
-        <h1 className="text-3xl font-bold tracking-tighter">Pending Remediations</h1>
-        <span className="bg-red-500/20 border border-red-500/30 text-red-400 text-xs px-2 py-1 rounded-full font-bold font-mono">
-          {approvals.length}
-        </span>
-        <button onClick={fetchApprovals} className="ml-auto text-gray-500 hover:text-white transition-colors">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-3">
+          <GitBranch className="text-indigo-400 w-7 h-7" />
+          <h1 className="text-3xl font-bold tracking-tighter">Predictions</h1>
+        </div>
+        <button onClick={fetchPredictions} className="text-gray-500 hover:text-white transition-colors">
           <RefreshCw size={16} />
         </button>
       </div>
+      <p className="text-gray-400 mb-8 tracking-tighter">
+        LSTM trajectory forecasts and SLA breach risk across monitored URLs.
+      </p>
 
-      <AnimatePresence mode="popLayout">
-        {approvals.map(approval => {
-          const state     = processing[approval.id];
-          const isDone    = state === 'done';
-          const isWorking = state === 'approving' || state === 'rejecting';
-          const snap      = approval.metrics_snapshot || {};
-          const conf      = approval.confidence ? (approval.confidence * 100).toFixed(0) : '—';
+      {/* Filter tabs */}
+      <div className="flex gap-2 mb-8">
+        {['all', 'critical', 'warning', 'normal'].map(f => (
+          <button key={f} onClick={() => { setFilter(f); setLoading(true); }}
+            className={`px-4 py-2 rounded-full text-xs font-mono font-bold transition-all border ${
+              filter === f
+                ? 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30'
+                : 'bg-white/5 text-gray-400 border-white/10 hover:border-white/20'
+            }`}>
+            {f.charAt(0).toUpperCase() + f.slice(1)}
+            <span className="ml-2 opacity-60">{counts[f] || 0}</span>
+          </button>
+        ))}
+      </div>
 
-          return (
-            <motion.div key={approval.id} layout
-              initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, scale: 0.95, filter: 'blur(10px)' }}
-              className="mb-6 metal-container-static w-full" style={{ '--m-radius': '1.5rem', '--m-border': '1px' }}>
-              <div className={`metal-surface p-8 transition-colors ${isDone ? 'bg-green-500/5' : ''}`}>
+      {/* Summary stats */}
+      <div className="grid grid-cols-3 gap-4 mb-8">
+        {[
+          { label: 'Critical', value: counts.critical, color: 'text-red-400', icon: <AlertTriangle size={14} /> },
+          { label: 'Warning',  value: counts.warning,  color: 'text-amber-400', icon: <AlertTriangle size={14} /> },
+          { label: 'Normal',   value: counts.normal,   color: 'text-green-400', icon: <TrendingUp size={14} /> },
+        ].map((s, i) => (
+          <div key={i} className="replica-3d-item p-4 flex items-center gap-3">
+            <span className={s.color}>{s.icon}</span>
+            <div>
+              <p className={`text-2xl font-bold tracking-tighter ${s.color}`}>{s.value}</p>
+              <p className="text-xs text-gray-500">{s.label}</p>
+            </div>
+          </div>
+        ))}
+      </div>
 
-                {/* Success state */}
-                {isDone ? (
-                  <div className="flex flex-col items-center py-8 gap-4">
-                    <CheckCircle className="text-green-500 w-12 h-12 animate-pulse drop-shadow-[0_0_15px_rgba(34,197,94,0.5)]" />
-                    <h2 className="text-2xl font-bold text-green-400 tracking-tighter">Executing Remediation</h2>
-                    <p className="text-gray-400 mt-2 font-mono text-sm">Restart initiated on {approval.service_id}</p>
-                  </div>
-                ) : (
-                  <>
-                    {/* Header */}
-                    <div className="mb-6">
-                      <span className="bg-amber-500/10 border border-amber-500/20 text-amber-500 text-xs px-3 py-1.5 rounded-full uppercase tracking-widest font-bold">
-                        <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse mr-2" />
-                        Approval Required • {new Date(approval.created_at).toLocaleTimeString()}
-                      </span>
-                      <h2 className="text-2xl font-bold mt-6 tracking-tighter">
-                        Proposed Action: {(approval.action || 'restart').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                      </h2>
-                      <p className="text-sm text-gray-400 font-mono mt-2 bg-white/5 inline-block px-3 py-1 rounded">
-                        Target: <span className="text-white">{approval.service_id}</span>
-                        {' '}| Confidence: <span className="text-amber-500">{conf}%</span>
-                        {' '}| Severity: <span className={approval.incident_severity === 'critical' ? 'text-red-400' : 'text-amber-400'}>
-                          {approval.incident_severity}
-                        </span>
-                      </p>
-                    </div>
-
-                    {/* Why section */}
-                    <div className="mb-8 metal-container-static" style={{ '--m-radius': '0.75rem', '--m-border': '1px' }}>
-                      <div className="metal-surface p-6">
-                        <h3 className="text-xs text-gray-500 uppercase tracking-widest mb-3 font-mono">Why this action?</h3>
-                        <p className="text-gray-300 italic border-l-2 border-indigo/50 pl-4 bg-gradient-to-r from-indigo/5 to-transparent py-2">
-                          "Metrics exceeded safe thresholds with {conf}% confidence. Historical data shows
-                          restart resolves this pattern with high success rate."
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Metrics snapshot bars */}
-                    {Object.keys(snap).length > 0 && (
-                      <div className="mb-10 space-y-4 font-mono text-sm bg-black/50 p-6 rounded-xl border border-white/5">
-                        <h3 className="text-xs text-gray-500 uppercase tracking-widest mb-4">Metrics at Prediction Time</h3>
-                        {Object.entries(snap).map(([k, v]) => {
-                          const pct   = typeof v === 'number' ? Math.min(v, 100) : 0;
-                          const isHigh = typeof v === 'number' && v > 80;
-                          return (
-                            <div key={k} className={`flex items-center gap-4 ${isHigh ? 'text-critical' : 'text-green-500'}`}>
-                              <span className="w-36 text-gray-400">{k}</span>
-                              <div className="flex-1 h-3 bg-white/5 rounded-full overflow-hidden">
-                                <div className={`h-full rounded-full ${isHigh ? 'bg-critical shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]'}`}
-                                  style={{ width: `${pct}%` }} />
-                              </div>
-                              <span>{typeof v === 'number' ? v.toFixed(1) : v}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    {/* Action bar */}
-                    <div className="flex items-center gap-4 border-t border-white/10 pt-6">
-                      <input type="text"
-                        value={reasons[approval.id] || ''}
-                        onChange={e => setReasons(r => ({ ...r, [approval.id]: e.target.value }))}
-                        placeholder="Rejection reason (optional)"
-                        className="bg-black/50 border border-white/10 rounded-full px-5 py-3 flex-1 text-sm focus:outline-none focus:border-indigo transition-colors text-white placeholder:text-gray-500" />
-
-                      <button onClick={() => handleReject(approval)} disabled={isWorking}
-                        className="metal-container group" style={{ '--m-radius': '9999px', '--m-border': '1px' }}>
-                        <div className="metal-surface px-6 py-3 font-bold text-sm text-gray-300 transition-colors group-hover:bg-[#151515] group-hover:text-white">
-                          {state === 'rejecting' ? 'Rejecting...' : 'Reject'}
-                        </div>
-                      </button>
-
-                      <MagicButton onClick={() => handleApprove(approval)} disabled={isWorking}>
-                        <span className="font-bold text-sm text-white drop-shadow-[0_0_8px_rgba(99,102,241,0.8)]">
-                          {state === 'approving' ? 'Executing...' : 'Approve & Execute'}
-                        </span>
-                      </MagicButton>
-                    </div>
-                  </>
-                )}
-              </div>
-            </motion.div>
-          );
-        })}
-      </AnimatePresence>
+      {/* Predictions list */}
+      {loading ? (
+        <p className="text-gray-500 font-mono animate-pulse">Loading predictions...</p>
+      ) : predictions.length === 0 ? (
+        <div className="tech-border bg-black/40 rounded-2xl p-16 flex flex-col items-center gap-4 text-center">
+          <TrendingUp size={32} className="text-gray-600" />
+          <p className="text-gray-400 font-mono">No predictions yet.</p>
+          <p className="text-gray-600 text-sm">Predictions appear after the ML pipeline processes enough probe data.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <AnimatePresence>
+            {predictions.map(pred => (
+              <PredictionCard key={pred.id} prediction={pred} />
+            ))}
+          </AnimatePresence>
+        </div>
+      )}
     </motion.main>
   );
 }

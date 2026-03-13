@@ -28,65 +28,103 @@ services:
       interval: 5s
       retries: 5
 
-  # ── Website probe — scans URLs added via frontend ───────────
+  # ── Website Probe ────────────────────────────────────────────
+  # Probes all URLs in probe-targets.json every 60 seconds.
+  # Writes real TTFB, DNS, TLS, SSL, error_rate to TimescaleDB.
+  # This is the PRIMARY data source for all three ML models.
   website-probe:
     build:
       context: ./services/website-probe
       dockerfile: Dockerfile
     environment:
-      REDIS_HOST: redis
-      DB_HOST:    postgres
-      DB_USER:    postgres
-      DB_PASSWORD: postgres
-      DB_NAME:    incident_predictor
+      DB_HOST:            postgres
+      DB_USER:            postgres
+      DB_PASSWORD:        postgres
+      DB_NAME:            incident_predictor
+      DATABASE_URL:       postgresql://postgres:postgres@postgres:5432/incident_predictor
+      REDIS_HOST:         redis
+      PROBE_INTERVAL_MS:  60000
+      REQUEST_TIMEOUT_MS: 15000
     depends_on:
       redis:    { condition: service_healthy }
       postgres: { condition: service_healthy }
     restart: unless-stopped
 
-  # ── Synthetic generator — ONLY for development/testing ──────
-  # Switch MODE: spike to test the approval flow
-  # Switch MODE: mixed to simulate realistic degradation
-  # DISABLE in production by removing this service
-  synthetic-generator:
-    build:
-      context: ./services/synthetic-generator
-      dockerfile: Dockerfile
-    environment:
-      REDIS_HOST: redis
-      MODE: mixed   # normal | spike | ramp | mixed
-    depends_on:
-      redis: { condition: service_healthy }
-    restart: unless-stopped
-    profiles:
-      - dev   # only starts with: docker compose --profile dev up
-
-  # ── Data ingestion ───────────────────────────────────────────
-  data-ingestion:
+  # ── Data Collector ────────────────────────────────────────────
+  # Runs two scheduled jobs:
+  #   1. fetch_crux_baselines.py  — daily, fetches Google CrUX real P75 baselines
+  #   2. fetch_status_incidents.py — every 6 hours, fetches real incidents from
+  #      public status pages (GitHub, Stripe, Cloudflare, Vercel, npm, etc.)
+  # These provide the ground-truth labels for the ML training pipeline.
+  data-collector:
     build:
       context: ./services/data-ingestion
       dockerfile: Dockerfile
     environment:
-      REDIS_HOST: redis
-      DB_HOST:    postgres
-      DB_USER:    postgres
-      DB_PASSWORD: postgres
-      DB_NAME:    incident_predictor
+      DATABASE_URL:   postgresql://postgres:postgres@postgres:5432/incident_predictor
+      DB_HOST:        postgres
+      DB_USER:        postgres
+      DB_PASSWORD:    postgres
+      DB_NAME:        incident_predictor
+      # How often to re-fetch (in hours). CrUX changes slowly so daily is fine.
+      CRUX_INTERVAL_HOURS:    24
+      STATUS_INTERVAL_HOURS:  6
+      # Optional: speeds up CrUX fetching from 150/day to 150/100s
+      # Get free key: console.cloud.google.com → Enable "Chrome UX Report API"
+      GOOGLE_API_KEY: ""
+    command: python3 src/collector_scheduler.py
+    volumes:
+      - ./services/website-probe/probe-targets.json:/app/probe-targets.json:ro
     depends_on:
-      redis:    { condition: service_healthy }
       postgres: { condition: service_healthy }
     restart: unless-stopped
 
-  # ── ML Service ───────────────────────────────────────────────
+  # ── ML Labeler ────────────────────────────────────────────────
+  # Runs label_probe_data.py every 6 hours.
+  # Cross-references probe readings with status page incident windows
+  # and programmatic z-score rules → writes to ml.labeled_probe_readings.
+  # Only starts producing useful output after 7+ days of probe data.
+  ml-labeler:
+    build:
+      context: ./services/ml-service
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/incident_predictor
+      DB_HOST:      postgres
+      DB_USER:      postgres
+      DB_PASSWORD:  postgres
+      DB_NAME:      incident_predictor
+    command: >
+      sh -c "
+        echo 'ML Labeler starting — runs every 6 hours';
+        while true; do
+          echo '[labeler] Running label_probe_data.py...';
+          python src/label_probe_data.py;
+          echo '[labeler] Done. Sleeping 6 hours...';
+          sleep 21600;
+        done
+      "
+    volumes:
+      - ml_models:/app/models
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ── ML Service ────────────────────────────────────────────────
+  # FastAPI server — loads trained models and serves predictions.
+  # Also exposes /train endpoint to trigger retraining manually.
   ml-service:
     build:
       context: ./services/ml-service
       dockerfile: Dockerfile
     environment:
-      DB_HOST:     postgres
-      DB_USER:     postgres
-      DB_PASSWORD: postgres
-      DB_NAME:     incident_predictor
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/incident_predictor
+      DB_HOST:      postgres
+      DB_USER:      postgres
+      DB_PASSWORD:  postgres
+      DB_NAME:      incident_predictor
+      SLA_TTFB_MS:  2000
+      MODEL_DIR:    /app/models
     volumes:
       - ml_models:/app/models
     ports:
@@ -95,7 +133,34 @@ services:
       postgres: { condition: service_healthy }
     restart: unless-stopped
 
-  # ── Decision Engine ──────────────────────────────────────────
+  # ── Data Ingestion ────────────────────────────────────────────
+  # Reads from Redis streams, calls ML service for predictions,
+  # forwards results to decision engine.
+  data-ingestion:
+    build:
+      context: ./services/data-ingestion
+      dockerfile: Dockerfile
+    environment:
+      REDIS_HOST:   redis
+      DB_HOST:      postgres
+      DB_USER:      postgres
+      DB_PASSWORD:  postgres
+      DB_NAME:      incident_predictor
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/incident_predictor
+      INPUT_WINDOW: 60
+      ML_URL:       http://ml-service:8000/ensemble
+      DECISION_URL: http://decision-engine:5000/evaluate
+    depends_on:
+      redis:    { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  # ── Decision Engine ───────────────────────────────────────────
+  # Evaluates ML predictions, scores confidence, triggers alerts.
+  # NOTE: No more auto-remediation. Actions are now:
+  #   ≥90% confidence → auto-send alert + generate incident report
+  #   70-89%          → flag for review in dashboard
+  #   <70%            → log only
   decision-engine:
     build:
       context: ./services/decision-engine
@@ -106,40 +171,28 @@ services:
       DB_USER:         postgres
       DB_PASSWORD:     postgres
       DB_NAME:         incident_predictor
+      DATABASE_URL:    postgresql://postgres:postgres@postgres:5432/incident_predictor
       ML_SERVICE_URL:  http://ml-service:8000
       API_GATEWAY_URL: http://api-gateway:3000
-      REMEDIATION_URL: http://remediation-engine:4000
+      SLA_TTFB_MS:     2000
     depends_on:
       redis:    { condition: service_healthy }
       postgres: { condition: service_healthy }
     restart: unless-stopped
 
-  # ── Remediation Engine ───────────────────────────────────────
-  remediation-engine:
-    build:
-      context: ./services/remediation-engine
-      dockerfile: Dockerfile
-    environment:
-      DB_HOST:     postgres
-      DB_USER:     postgres
-      DB_PASSWORD: postgres
-      DB_NAME:     incident_predictor
-    depends_on:
-      postgres: { condition: service_healthy }
-    restart: unless-stopped
-
-  # ── API Gateway ──────────────────────────────────────────────
+  # ── API Gateway ───────────────────────────────────────────────
   api-gateway:
     build:
       context: ./services/api-gateway
       dockerfile: Dockerfile
     environment:
-      DB_HOST:     postgres
-      DB_USER:     postgres
-      DB_PASSWORD: postgres
-      DB_NAME:     incident_predictor
-      JWT_SECRET:  change-this-in-production
-      PORT:        3000
+      DB_HOST:      postgres
+      DB_USER:      postgres
+      DB_PASSWORD:  postgres
+      DB_NAME:      incident_predictor
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/incident_predictor
+      JWT_SECRET:   change-this-in-production
+      PORT:         3000
     ports:
       - "3000:3000"
     depends_on:
@@ -147,6 +200,22 @@ services:
       redis:    { condition: service_healthy }
     restart: unless-stopped
 
+  # ── Synthetic Generator (dev only) ───────────────────────────
+  # Only starts with: docker compose --profile dev up
+  # Kept for testing the approval/alert UI without waiting for real anomalies.
+  synthetic-generator:
+    build:
+      context: ./services/synthetic-generator
+      dockerfile: Dockerfile
+    environment:
+      REDIS_HOST: redis
+      MODE: mixed
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    profiles:
+      - dev
+
 volumes:
   postgres_data:
-  ml_models:      # persists trained models across rebuilds
+  ml_models:

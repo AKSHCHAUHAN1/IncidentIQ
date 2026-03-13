@@ -1,42 +1,51 @@
-"""
-main.py — ML Service (Month 3 final)
-
-Models:
-  LSTM             → /predict      (z-score normalized forecasting)
-  Isolation Forest → /anomaly      (statistical anomaly detection)
-  TF-IDF+LR       → /classify-log (log severity classification)
-  Ensemble         → /ensemble     (fusion of all three)
-"""
+"""ML inference service for web performance anomaly detection and SLA forecasting."""
 
 import os
 import sys
-import torch
+from typing import List, Optional
+
 import joblib
 import numpy as np
+import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import FEATURES, INPUT_WINDOW, OUTPUT_WINDOW
-from model  import LSTMModel
+from model import LSTMModel
 
 app = FastAPI(title="IncidentIQ ML Service")
 
-# ── Load models ───────────────────────────────────────────────
 MODEL_DIR = "/app/models"
+SLA_TTFB_MS = float(os.getenv("SLA_TTFB_MS", "2000"))
 
-lstm_model    = None
-scaler        = None
-baseline      = None   # {"mean": array, "std": array}
-iso_model     = None
-log_classifier = None  # sklearn Pipeline
+lstm_model = None
+scaler = None
+baseline = None
+iso_model = None
+log_classifier = None
+
+ANOMALY_LABELS = {
+    "dns_degradation",
+    "origin_slowdown",
+    "latency_spike",
+    "error_spike",
+    "ssl_expiry_warning",
+    "cdn_throttling",
+    "timeout_pattern",
+}
+
 
 def load_models():
     global lstm_model, scaler, baseline, iso_model, log_classifier
 
-    # LSTM
+    lstm_model = None
+    scaler = None
+    baseline = None
+    iso_model = None
+    log_classifier = None
+
     lstm_path = os.path.join(MODEL_DIR, "model.pt")
     if os.path.exists(lstm_path):
         lstm_model = LSTMModel(len(FEATURES))
@@ -46,8 +55,7 @@ def load_models():
     else:
         print("✗ LSTM not found — train first")
 
-    # Scaler / baseline
-    scaler_path   = os.path.join(MODEL_DIR, "scaler.pkl")
+    scaler_path = os.path.join(MODEL_DIR, "scaler.pkl")
     baseline_path = os.path.join(MODEL_DIR, "baseline.pkl")
     if os.path.exists(scaler_path):
         scaler = joblib.load(scaler_path)
@@ -56,7 +64,6 @@ def load_models():
         baseline = joblib.load(baseline_path)
         print("✓ Baseline loaded")
 
-    # Isolation Forest
     iso_path = os.path.join(MODEL_DIR, "isolation_forest.pkl")
     if os.path.exists(iso_path):
         iso_model = joblib.load(iso_path)
@@ -64,190 +71,355 @@ def load_models():
     else:
         print("✗ Isolation Forest not found — train first")
 
-    # Log classifier (TF-IDF + LR)
-    log_path = os.path.join(MODEL_DIR, "log_classifier.pkl")
-    if os.path.exists(log_path):
-        log_classifier = joblib.load(log_path)
-        print("✓ Log classifier loaded")
+    pattern_path = os.path.join(MODEL_DIR, "pattern_classifier.pkl")
+    legacy_log_path = os.path.join(MODEL_DIR, "log_classifier.pkl")
+    if os.path.exists(pattern_path):
+        log_classifier = joblib.load(pattern_path)
+        print("✓ Pattern classifier loaded")
+    elif os.path.exists(legacy_log_path):
+        log_classifier = joblib.load(legacy_log_path)
+        print("✓ Legacy log classifier loaded")
     else:
-        print("✗ Log classifier not found — train first")
+        print("✗ Pattern classifier not found — train first")
+
 
 load_models()
 
 
-# ── Schemas ───────────────────────────────────────────────────
 class PredictRequest(BaseModel):
-    data: List[List[float]]   # shape: (INPUT_WINDOW, num_features)
+    data: List[List[float]]
+
 
 class LogRequest(BaseModel):
     log_text: str
 
+
 class EnsembleRequest(BaseModel):
-    metrics_window: List[List[float]]    # (INPUT_WINDOW, num_features)
+    metrics_window: List[List[float]]
     log_text: Optional[str] = ""
+
 
 class AnomalyRequest(BaseModel):
     data: List[List[float]]
 
 
-# ── Helpers ───────────────────────────────────────────────────
-def to_zscore(window_np):
-    """Normalize raw metric window using saved baseline."""
+def _normalize_classifier_label(label) -> str:
+    if isinstance(label, (int, np.integer)):
+        return {0: "normal", 1: "warning", 2: "critical"}.get(int(label), "normal")
+    return str(label)
+
+
+def _classifier_probabilities(text: str) -> dict:
+    if log_classifier is None:
+        return {}
+    if not hasattr(log_classifier, "predict_proba"):
+        return {}
+
+    probs = log_classifier.predict_proba([text])[0]
+    classes = [_normalize_classifier_label(c) for c in getattr(log_classifier, "classes_", [])]
+    if not classes:
+        classes = [f"class_{i}" for i in range(len(probs))]
+    return {classes[i]: float(probs[i]) for i in range(min(len(classes), len(probs)))}
+
+
+def to_zscore(window_np: np.ndarray) -> np.ndarray:
     if baseline is not None:
         return (window_np - baseline["mean"]) / baseline["std"]
-    elif scaler is not None:
+    if scaler is not None:
         return scaler.transform(window_np)
     return window_np
 
-def from_zscore(zscores):
-    """Convert z-score predictions back to raw values."""
+
+def from_zscore(zscores: np.ndarray) -> np.ndarray:
     if baseline is not None:
         return zscores * baseline["std"] + baseline["mean"]
-    elif scaler is not None:
+    if scaler is not None:
         return scaler.inverse_transform(zscores)
     return zscores
 
 
-# ── /predict — LSTM forecast ──────────────────────────────────
-@app.post("/predict")
-def predict(request: PredictRequest):
+def _validate_shape(arr: np.ndarray):
+    expected = (INPUT_WINDOW, len(FEATURES))
+    if arr.shape != expected:
+        raise HTTPException(400, f"Expected shape {expected}, got {arr.shape}")
+
+
+def _run_lstm(arr: np.ndarray) -> np.ndarray:
     if lstm_model is None:
         raise HTTPException(503, "LSTM model not loaded")
-
-    arr = np.array(request.data, dtype=np.float32)
-    if arr.shape != (INPUT_WINDOW, len(FEATURES)):
-        raise HTTPException(400, f"Expected shape ({INPUT_WINDOW}, {len(FEATURES)}), got {arr.shape}")
-
-    # Normalize → run LSTM → denormalize
     normalized = to_zscore(arr)
-    inp        = torch.tensor(normalized[np.newaxis, ...], dtype=torch.float32)
-
+    inp = torch.tensor(normalized[np.newaxis, ...], dtype=torch.float32)
     with torch.no_grad():
-        out = lstm_model(inp)  # (1, OUTPUT_WINDOW * num_features)
+        out = lstm_model(inp)
+    z_pred = out.numpy().reshape(OUTPUT_WINDOW, len(FEATURES))
+    return from_zscore(z_pred)
 
-    z_pred   = out.numpy().reshape(OUTPUT_WINDOW, len(FEATURES))
-    raw_pred = from_zscore(z_pred)
+
+def _root_cause_rule(ttfb_ms: float, dns_ms: float, error_rate: float, ssl_days_left: float, status_code: float = 200.0) -> str:
+    if ssl_days_left < 14:
+        return "ssl_expiry_warning"
+    if status_code >= 500 or error_rate >= 10:
+        return "error_spike"
+    ratio = ttfb_ms / max(dns_ms, 1.0)
+    if dns_ms >= 250 and ratio <= 3.5:
+        return "dns_degradation"
+    if ttfb_ms >= 1200 and ratio >= 5:
+        return "origin_slowdown"
+    if ttfb_ms >= 900:
+        return "latency_spike"
+    return "normal"
+
+
+def _breach_eta(ttfb_forecast: np.ndarray, threshold_ms: float) -> Optional[int]:
+    crossings = np.where(ttfb_forecast >= threshold_ms)[0]
+    if crossings.size == 0:
+        return None
+    return int(crossings[0]) + 1
+
+
+@app.post("/predict")
+def predict(request: PredictRequest):
+    arr = np.array(request.data, dtype=np.float32)
+    _validate_shape(arr)
+    raw_pred = _run_lstm(arr)
+
+    idx = {f: i for i, f in enumerate(FEATURES)}
+    ttfb_idx = idx["ttfb_ms"]
+    dns_idx = idx["dns_ms"]
+    err_idx = idx["error_rate"]
+    ssl_idx = idx["ssl_days_left"]
+
+    ttfb_forecast = raw_pred[:, ttfb_idx]
+    eta = _breach_eta(ttfb_forecast, SLA_TTFB_MS)
+
+    current = arr[-1]
+    root_cause = _root_cause_rule(
+        float(current[ttfb_idx]),
+        float(current[dns_idx]),
+        float(current[err_idx]),
+        float(current[ssl_idx]),
+    )
 
     return {
-        "prediction":    raw_pred.tolist(),
+        "prediction": raw_pred.tolist(),
         "feature_names": FEATURES,
         "output_window": OUTPUT_WINDOW,
+        "ttfb_forecast_ms": ttfb_forecast.tolist(),
+        "p95_ttfb_ms": float(np.percentile(ttfb_forecast, 95)),
+        "sla_threshold_ms": SLA_TTFB_MS,
+        "breach_eta_min": eta,
+        "root_cause": root_cause,
     }
 
 
-# ── /anomaly — Isolation Forest ───────────────────────────────
 @app.post("/anomaly")
 def detect_anomaly(request: AnomalyRequest):
     if iso_model is None:
         raise HTTPException(503, "Isolation Forest not loaded")
 
-    arr   = np.array(request.data, dtype=np.float32)
-    flags = iso_model.predict(arr)           # -1 = anomaly, 1 = normal
-    scores = iso_model.decision_function(arr) # negative = more anomalous
+    arr = np.array(request.data, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+
+    flags = iso_model.predict(arr)
+    scores = iso_model.decision_function(arr)
 
     return {
-        "anomaly_flags":  flags.tolist(),
+        "anomaly_flags": flags.tolist(),
         "anomaly_scores": scores.tolist(),
-        "anomaly_count":  int((flags == -1).sum()),
+        "anomaly_count": int((flags == -1).sum()),
     }
 
 
-# ── /classify-log — TF-IDF + LR ──────────────────────────────
 @app.post("/classify-log")
 def classify_log(req: LogRequest):
     if log_classifier is None:
-        raise HTTPException(503, "Log classifier not loaded")
+        raise HTTPException(503, "Pattern classifier not loaded")
 
-    pred  = log_classifier.predict([req.log_text])[0]
-    proba = log_classifier.predict_proba([req.log_text])[0]
+    pred = log_classifier.predict([req.log_text])[0]
+    label = _normalize_classifier_label(pred)
+    probabilities = _classifier_probabilities(req.log_text)
 
-    label_map = {0: "normal", 1: "warning", 2: "critical"}
     return {
-        "prediction":    label_map[pred],
-        "probabilities": {
-            "normal":   float(proba[0]),
-            "warning":  float(proba[1]),
-            "critical": float(proba[2]),
-        }
+        "prediction": label,
+        "probabilities": probabilities,
     }
 
 
-# ── /ensemble — Fusion of all three ──────────────────────────
 @app.post("/ensemble")
 def ensemble_predict(req: EnsembleRequest):
-    if lstm_model is None:
-        raise HTTPException(503, "LSTM model not loaded")
+    arr = np.array(req.metrics_window, dtype=np.float32)
+    _validate_shape(arr)
+    raw_pred = _run_lstm(arr)
 
-    arr  = np.array(req.metrics_window, dtype=np.float32)
-    norm = to_zscore(arr)
-    inp  = torch.tensor(norm[np.newaxis, ...], dtype=torch.float32)
+    idx = {f: i for i, f in enumerate(FEATURES)}
+    ttfb_idx = idx["ttfb_ms"]
+    dns_idx = idx["dns_ms"]
+    err_idx = idx["error_rate"]
+    ssl_idx = idx["ssl_days_left"]
 
-    with torch.no_grad():
-        out = lstm_model(inp)
+    current = arr[-1]
+    forecast_last = raw_pred[-1]
 
-    z_pred   = out.numpy().reshape(OUTPUT_WINDOW, len(FEATURES))
-    raw_pred = from_zscore(z_pred)
-    worst    = raw_pred[-1]  # final forecast step
+    current_ttfb = float(current[ttfb_idx])
+    current_dns = float(current[dns_idx])
+    current_error = float(current[err_idx])
+    current_ssl = float(current[ssl_idx])
 
-    # Map features
-    feat_idx = {f: i for i, f in enumerate(FEATURES)}
-    cpu         = float(worst[feat_idx.get("cpu", 0)])
-    memory      = float(worst[feat_idx.get("memory", 1)])
-    error_rate  = float(worst[feat_idx.get("error_rate", 3)])
-    latency     = float(worst[feat_idx.get("latency", 4)])
+    forecast_ttfb = raw_pred[:, ttfb_idx]
+    worst_ttfb = float(np.max(forecast_ttfb))
+    breach_eta = _breach_eta(forecast_ttfb, SLA_TTFB_MS)
 
-    # Isolation Forest on forecast
     iso_flag = 1
     if iso_model is not None:
-        iso_flag = int(iso_model.predict([worst])[0])
+        try:
+            eval_row = np.array([[current_ttfb, current_dns, current_error, current_ssl]], dtype=np.float32)
+            iso_flag = int(iso_model.predict(eval_row)[0])
+        except Exception:
+            iso_flag = 1
 
-    # Log classification
-    log_label = "normal"
-    log_proba = {}
+    pattern_label = "normal"
+    pattern_probabilities = {}
     if log_classifier is not None and req.log_text:
-        log_label = log_classifier.predict([req.log_text])[0]
-        proba     = log_classifier.predict_proba([req.log_text])[0]
-        log_proba = {"normal": float(proba[0]), "warning": float(proba[1]), "critical": float(proba[2])}
-        log_label = ["normal", "warning", "critical"][log_label]
+        pred = log_classifier.predict([req.log_text])[0]
+        pattern_label = _normalize_classifier_label(pred)
+        pattern_probabilities = _classifier_probabilities(req.log_text)
 
-    # Fusion rules
-    if (iso_flag == -1 or log_label == "critical" or
-            cpu > 85 or memory > 85 or error_rate > 20 or latency > 300):
+    root_cause = pattern_label if pattern_label in ANOMALY_LABELS else _root_cause_rule(
+        current_ttfb,
+        current_dns,
+        current_error,
+        current_ssl,
+    )
+
+    if breach_eta is not None and breach_eta <= 10:
         severity = "critical"
-    elif (log_label == "warning" or
-            cpu > 70 or memory > 75 or error_rate > 10 or latency > 200):
+    elif current_ttfb >= SLA_TTFB_MS or current_error >= 15 or iso_flag == -1:
+        severity = "critical"
+    elif breach_eta is not None and breach_eta <= 30:
+        severity = "warning"
+    elif current_ttfb >= SLA_TTFB_MS * 0.7 or current_dns >= 200 or current_error >= 5:
         severity = "warning"
     else:
         severity = "normal"
 
+    confidence = 0.2
+    confidence += min(current_ttfb / SLA_TTFB_MS, 1.0) * 0.35
+    confidence += min(current_error / 20.0, 1.0) * 0.2
+    confidence += min(current_dns / 300.0, 1.0) * 0.15
+    confidence += 0.15 if iso_flag == -1 else 0.0
+    confidence += 0.15 if (breach_eta is not None and breach_eta <= 30) else 0.0
+    confidence += 0.1 if root_cause in ANOMALY_LABELS else 0.0
+    confidence = min(float(confidence), 0.99)
+
     return {
-        "severity":        severity,
+        "severity": severity,
+        "confidence": confidence,
+        "root_cause": root_cause,
+        "breach_eta_min": breach_eta,
+        "sla_threshold_ms": SLA_TTFB_MS,
+        "ttfb_forecast_ms": forecast_ttfb.tolist(),
+        "prediction": raw_pred.tolist(),
         "lstm_prediction": raw_pred.tolist(),
-        "iso_flag":        iso_flag,
-        "log_label":       log_label,
-        "log_proba":       log_proba,
-        "forecast_worst":  {
-            "cpu":         cpu,
-            "memory":      memory,
-            "error_rate":  error_rate,
-            "latency":     latency,
+        "iso_flag": iso_flag,
+        "pattern_label": pattern_label,
+        "pattern_probabilities": pattern_probabilities,
+        "current_metrics": {
+            "ttfb_ms": current_ttfb,
+            "dns_ms": current_dns,
+            "error_rate": current_error,
+            "ssl_days_left": current_ssl,
+        },
+        "forecast_worst": {
+            "ttfb_ms": worst_ttfb,
+            "dns_ms": float(forecast_last[dns_idx]),
+            "error_rate": float(forecast_last[err_idx]),
+            "ssl_days_left": float(forecast_last[ssl_idx]),
         },
     }
 
-
-# ── /health ───────────────────────────────────────────────────
 @app.get("/health")
 def health():
     return {
-        "status":       "running",
-        "lstm_loaded":  lstm_model    is not None,
-        "iso_loaded":   iso_model     is not None,
-        "log_loaded":   log_classifier is not None,
-        "baseline_loaded": baseline   is not None,
+        "status": "running",
+        "lstm_loaded": lstm_model is not None,
+        "iso_loaded": iso_model is not None,
+        "log_loaded": log_classifier is not None,
+        "pattern_loaded": log_classifier is not None,
+        "baseline_loaded": baseline is not None,
     }
 
 
-# ── /reload — hot-reload models without restart ───────────────
+# ── Aliases to match documentation endpoint names ─────────────
+@app.post("/detect-anomaly")
+def detect_anomaly_alias(request: AnomalyRequest):
+    """Alias for /anomaly (doc-specified name)."""
+    return detect_anomaly(request)
+
+
+@app.post("/classify")
+def classify_alias(req: LogRequest):
+    """Alias for /classify-log (doc-specified name)."""
+    return classify_log(req)
+
+
+# ── Training endpoint ─────────────────────────────────────────
+@app.post("/train")
+def train_models():
+    """Trigger model retraining on latest labeled data."""
+    import subprocess
+    train_script = os.path.join(os.path.dirname(__file__), "..", "training", "train_models.py")
+    if not os.path.exists(train_script):
+        raise HTTPException(404, f"Training script not found at {train_script}")
+    try:
+        result = subprocess.run(
+            [sys.executable, train_script],
+            capture_output=True, text=True, timeout=600
+        )
+        load_models()  # reload after training
+        return {
+            "status": "completed" if result.returncode == 0 else "failed",
+            "returncode": result.returncode,
+            "stdout": result.stdout[-2000:] if result.stdout else "",
+            "stderr": result.stderr[-2000:] if result.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "Training timed out after 10 minutes")
+    except Exception as e:
+        raise HTTPException(500, f"Training error: {str(e)}")
+
+
+# ── Model info endpoint ──────────────────────────────────────
+@app.get("/model/info")
+def model_info():
+    """Return model metadata: version, files, and status."""
+    info = {"models": {}}
+    model_files = {
+        "lstm": "model.pt",
+        "isolation_forest": "isolation_forest.pkl",
+        "pattern_classifier": "pattern_classifier.pkl",
+        "scaler": "scaler.pkl",
+        "baseline": "baseline.pkl",
+    }
+    for name, filename in model_files.items():
+        path = os.path.join(MODEL_DIR, filename)
+        if os.path.exists(path):
+            stat = os.stat(path)
+            info["models"][name] = {
+                "loaded": True,
+                "file": filename,
+                "size_bytes": stat.st_size,
+                "modified": os.path.getmtime(path),
+            }
+        else:
+            info["models"][name] = {"loaded": False, "file": filename}
+    info["sla_threshold_ms"] = SLA_TTFB_MS
+    info["input_window"] = INPUT_WINDOW
+    info["output_window"] = OUTPUT_WINDOW
+    info["features"] = FEATURES
+    return info
+
+
 @app.post("/reload")
 def reload_models():
     load_models()

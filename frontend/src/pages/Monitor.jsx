@@ -42,7 +42,7 @@ const SiteSparkline = ({ siteId }) => {
         if (d.metrics?.length) {
           setData(d.metrics.map(m => ({
             time: new Date(m.time).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' }),
-            rt:   Math.round(m.response_time || m.latency || 0),
+            rt:   Math.round(m.response_time_ms || m.response_time || m.ttfb_ms || m.latency || 0),
           })));
         }
       })
@@ -149,7 +149,7 @@ export default function Monitor() {
 
   useEffect(() => {
     fetchSites();
-    intervalRef.current = setInterval(fetchSites, 30_000); // auto-refresh every probe cycle
+    intervalRef.current = setInterval(fetchSites, 60_000); // auto-refresh every probe cycle
     socket.on('probe_update', fetchSites);
     return () => { clearInterval(intervalRef.current); socket.off('probe_update'); };
   }, []);
@@ -194,7 +194,7 @@ export default function Monitor() {
         </button>
       </div>
       <p className="text-gray-400 mb-10 tracking-tighter">
-        Add any URL — IncidentIQ probes it every 30s and predicts failures automatically.
+        Add any URL — IncidentIQ probes it every 60s and predicts SLA risk before downtime.
       </p>
 
       {/* URL input */}
@@ -269,10 +269,10 @@ export default function Monitor() {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 font-mono text-xs text-gray-500">
           {[
-            ["1. Probe",     "IncidentIQ hits your URL every 30s, measuring response time, TTFB, SSL days and availability"],
+            ["1. Probe",     "IncidentIQ hits your URL every 60s, measuring TTFB, DNS, SSL days, and availability"],
             ["2. Ingest",    "Raw metrics flow into TimescaleDB via Redis stream — same pipeline as internal services"],
-            ["3. Predict",   "LSTM forecasts the next 10 minutes. Isolation Forest flags anomalies in real time"],
-            ["4. Remediate", "When confidence ≥ 70%, you get an approval request. At ≥ 90%, action is automatic"],
+            ["3. Predict",   "LSTM forecasts the next 30 minutes. Isolation Forest flags anomalous performance shifts"],
+            ["4. Alert", "When confidence is high, IncidentIQ generates a structured incident report and alert"],
           ].map(([title, desc]) => (
             <div key={title} className="replica-3d-item p-3">
               <p className="text-indigo-400 font-bold mb-1">{title}</p>

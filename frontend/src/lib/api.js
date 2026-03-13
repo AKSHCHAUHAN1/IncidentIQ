@@ -71,6 +71,9 @@ export const api = {
   approve:       (id)          => call(`/api/approvals/${id}/approve`, { method: 'POST' }),
   reject:        (id, reason)  => call(`/api/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
 
+  // Services
+  services:      ()            => call('/api/services'),
+
   // Monitored sites
   sites:         ()            => call('/api/sites'),
   addSite:       (url, name)   => call('/api/sites', { method: 'POST', body: JSON.stringify({ url, name }) }),

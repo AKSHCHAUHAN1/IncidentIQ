@@ -79,10 +79,15 @@ def train():
 
     for epoch in range(EPOCHS):
         model.train()
-        train_loss = sum(
-            (lambda pred: loss_fn(pred, yb))(model(xb))
-            for xb, yb in train_loader
-        ) / len(train_loader)
+        train_loss = 0
+        for xb, yb in train_loader:
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = loss_fn(pred, yb)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
 
         model.eval()
         val_loss = 0
@@ -91,7 +96,7 @@ def train():
                 val_loss += loss_fn(model(xb), yb).item()
         val_loss /= len(val_loader)
 
-        print(f"  Epoch {epoch+1:02d}/{EPOCHS}  train={train_loss:.4f}  val={val_loss:.4f}")
+        print(f"  Epoch {epoch+1:02d}/{EPOCHS}  train={train_loss:.6f}  val={val_loss:.6f}")
 
         if val_loss < best_val:
             best_val = val_loss

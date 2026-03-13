@@ -45,40 +45,52 @@ const TiltCard = ({ children, className = "" }) => {
 };
 
 export default function Dashboard() {
-  const headingText = useTypewriter(["Predict Failures", "Auto-Remediate", "Prevent Downtime"]);
+  const headingText = useTypewriter(["Predict SLA Breaches", "Detect Latency Drift", "Classify Root Cause"]);
 
   // ── State ──────────────────────────────────────────────────
   const [stats, setStats] = useState([
     { label: "Total Incidents",    value: "—",  sub: "loading...",     alert: false },
     { label: "Active Alerts",      value: "—",  sub: "loading...",     alert: false },
-    { label: "Predictions (24h)",  value: "—",  sub: "loading..." },
-    { label: "Auto-Resolved",      value: "—",  sub: "loading..." },
+    { label: "SLA Compliance (24h)", value: "—", sub: "loading..." },
+    { label: "Reports Dispatched", value: "—",  sub: "loading..." },
   ]);
   const [metricsData, setMetricsData]         = useState([]);
   const [activePredictions, setActivePredictions] = useState([]);
+  const [activeService, setActiveService]         = useState(null);
   const timer = useRef(null);
 
   // ── Fetch helpers ─────────────────────────────────────────
   async function fetchSummary() {
     try {
       const d = await api.summary();
+      const activeAlerts = (d.incidents?.predicted || 0) + (d.remediations?.pending || 0);
       setStats([
-        { label: "Total Incidents",   value: String(d.incidents.total),           sub: `${d.incidents.critical} critical`,            alert: false },
-        { label: "Active Alerts",     value: String(d.remediations.pending),       sub: "pending approval",                            alert: d.remediations.pending > 0 },
-        { label: "Predictions (24h)", value: String(d.predictions.last_24h),       sub: `${d.predictions.accuracy_pct}% accuracy` },
-        { label: "Auto-Resolved",     value: String(d.remediations.auto_executed), sub: "auto-executed" },
+        { label: "Total Incidents", value: String(d.incidents?.total ?? 0), sub: `${d.incidents?.critical ?? 0} critical`, alert: false },
+        { label: "Active Alerts", value: String(activeAlerts), sub: `${d.remediations?.pending ?? 0} pending approval`, alert: activeAlerts > 0 },
+        { label: "SLA Compliance (24h)", value: `${d.sla?.compliance_pct ?? 0}%`, sub: `threshold ${d.sla?.threshold_ms ?? 2000}ms` },
+        { label: "Reports Dispatched", value: String(d.remediations?.alert_reports ?? 0), sub: `${d.predictions?.last_24h ?? 0} predictions (24h)` },
       ]);
     } catch {}
   }
 
   async function fetchMetrics() {
     try {
-      const d = await api.metricsLive('service-a', 30);
+      // Resolve the most active service if we don't have one yet
+      let svc = activeService;
+      if (!svc) {
+        const svcData = await api.services();
+        if (svcData.services?.length) {
+          svc = svcData.services[0].service_id;
+          setActiveService(svc);
+        }
+      }
+      if (!svc) return;
+      const d = await api.metricsLive(svc, 30);
       if (d.metrics?.length) {
         setMetricsData(d.metrics.map(m => ({
           time:        new Date(m.time).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          cpu:         parseFloat((m.cpu    || 0).toFixed(1)),
-          memory:      parseFloat((m.memory || 0).toFixed(1)),
+          ttfb_ms:     parseFloat((m.ttfb_ms || m.response_time_ms || m.latency || 0).toFixed(1)),
+          dns_ms:      parseFloat((m.dns_ms || 0).toFixed(1)),
           error_rate:  parseFloat((m.error_rate || 0).toFixed(2)),
         })));
       }
@@ -87,12 +99,12 @@ export default function Dashboard() {
 
   async function fetchPredictions() {
     try {
-      const d = await api.predictions({ limit: 5 });
+      const d = await api.predictions({ limit: 20 });
       if (d.predictions?.length) {
         setActivePredictions(d.predictions.map(p => ({
           service:  p.service_id,
           conf:     (p.confidence * 100).toFixed(0),
-          issue:    `${p.severity.toUpperCase()} — ${(p.confidence * 100).toFixed(0)}% confidence`,
+          issue:    `${(p.prediction_data?.root_cause || p.severity || 'normal').replace(/_/g, ' ')}${p.prediction_data?.breach_eta_min ? ` • SLA ${p.prediction_data.breach_eta_min}m` : ''}`,
           severity: p.severity,
         })));
       }
@@ -110,7 +122,7 @@ export default function Dashboard() {
         conf:     (pred.confidence * 100).toFixed(0),
         issue:    `${pred.severity?.toUpperCase()} — ${(pred.confidence * 100).toFixed(0)}% confidence`,
         severity: pred.severity,
-      }, ...prev].slice(0, 5));
+      }, ...prev].slice(0, 20));
       fetchSummary();
     });
 
@@ -146,23 +158,23 @@ export default function Dashboard() {
           </motion.span>
         </h1>
         <p className="relative z-10 text-gray-400 max-w-2xl mx-auto text-lg tracking-tighter mb-8">
-          LSTM forecasting integrated with pgvector similarity search.<br/>
-          Securing infrastructure 30 minutes before failure.
+          LSTM forecasts TTFB trajectory and predicts SLA breach risk.<br/>
+          Root-cause hints classify DNS, origin, SSL, and error-driven anomalies.
         </p>
         <div className="relative z-10 mt-4 grid grid-cols-1 md:grid-cols-3 gap-6 border-t border-white/10 pt-8 text-left max-w-3xl mx-auto">
           <div className="replica-3d-item space-y-1 p-4">
             <p className="text-xs text-gray-500 font-mono uppercase">ML Model Status</p>
             <p className="text-sm text-indigo font-mono flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo animate-pulse"/> LSTM Active (v2.4)
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo animate-pulse"/> LSTM + IF + TF-IDF active
             </p>
           </div>
           <div className="replica-3d-item space-y-1 p-4">
-            <p className="text-xs text-gray-500 font-mono uppercase">Vector Database</p>
-            <p className="text-sm text-gray-300 font-mono">pgvector connected</p>
+            <p className="text-xs text-gray-500 font-mono uppercase">SLA Objective</p>
+            <p className="text-sm text-gray-300 font-mono">P95 TTFB under 2s</p>
           </div>
           <div className="replica-3d-item space-y-1 p-4">
-            <p className="text-xs text-gray-500 font-mono uppercase">Prediction Window</p>
-            <p className="text-sm text-gray-300 font-mono">T-30 Minutes</p>
+            <p className="text-xs text-gray-500 font-mono uppercase">Prediction Horizon</p>
+            <p className="text-sm text-gray-300 font-mono">Next 30 minutes</p>
           </div>
         </div>
       </div>
@@ -191,7 +203,7 @@ export default function Dashboard() {
 
         {/* Live chart — real data */}
         <TiltCard className="col-span-2 h-96">
-          <h3 className="text-xl font-semibold mb-4 text-white/90 relative z-10 drop-shadow-sm">Live Metrics & LSTM Forecast</h3>
+          <h3 className="text-xl font-semibold mb-4 text-white/90 relative z-10 drop-shadow-sm">Live Web Performance Signals</h3>
           {metricsData.length > 0 ? (
             <div className="w-full h-64 relative z-10">
               <ResponsiveContainer width="100%" height="100%">
@@ -199,10 +211,10 @@ export default function Dashboard() {
                   <XAxis dataKey="time" stroke="#64748b" tick={{ fill: '#64748b', fontSize: 10 }} interval="preserveStartEnd" />
                   <YAxis stroke="#64748b" tick={{ fill: '#64748b', fontSize: 10 }} />
                   <Tooltip contentStyle={{ backgroundColor: 'rgba(15,17,23,0.95)', borderColor: 'rgba(255,255,255,0.1)', backdropFilter: 'blur(10px)', fontSize: 11 }} />
-                  <ReferenceLine y={80} stroke="#ef4444" strokeDasharray="3 3" />
-                  <Line type="monotone" dataKey="cpu"        name="CPU %"      stroke="#6366f1" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="memory"     name="Memory %"   stroke="#ef4444" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="error_rate" name="Error Rate" stroke="#f59e0b" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
+                  <ReferenceLine y={2000} stroke="#ef4444" strokeDasharray="3 3" />
+                  <Line type="monotone" dataKey="ttfb_ms"    name="TTFB (ms)"   stroke="#6366f1" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="dns_ms"     name="DNS (ms)"    stroke="#06b6d4" strokeWidth={1.8} dot={false} />
+                  <Line type="monotone" dataKey="error_rate" name="Error Rate%" stroke="#f59e0b" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -214,9 +226,9 @@ export default function Dashboard() {
         </TiltCard>
 
         {/* Active predictions — real data */}
-        <TiltCard className="col-span-1 h-96 overflow-y-auto">
+        <TiltCard className="col-span-1 h-96">
           <h3 className="text-xl font-semibold mb-4 text-white/90 relative z-10 drop-shadow-sm">Active Predictions</h3>
-          <div className="space-y-4 relative z-10">
+          <div className="space-y-4 relative z-10 flex-1 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
             {activePredictions.length === 0 ? (
               <p className="text-gray-600 text-sm font-mono">No predictions yet — system normal</p>
             ) : activePredictions.map((pred, i) => (

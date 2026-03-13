@@ -55,10 +55,9 @@ def build_sample_input(n_rows: int = None) -> list:
     rows = []
     for _ in range(n):
         rows.append([
-            round(40 + np.random.uniform(-5, 5), 2),   # cpu
-            round(60 + np.random.uniform(-5, 5), 2),   # memory
-            round(500 + np.random.uniform(-50, 50), 2), # request_rate
-            round(max(0, 5 + np.random.uniform(-2, 2)), 2),  # error_rate
-            round(120 + np.random.uniform(-20, 20), 2), # latency
+            round(350 + np.random.uniform(-90, 160), 2),  # ttfb_ms
+            round(45 + np.random.uniform(-15, 40), 2),    # dns_ms
+            round(max(0, 1.2 + np.random.uniform(-1, 4)), 2),  # error_rate (%)
+            round(90 + np.random.uniform(-2, 2), 2),      # ssl_days_left
         ])
     return rows

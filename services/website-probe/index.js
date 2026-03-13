@@ -1,214 +1,332 @@
 /**
  * website-probe/index.js
+ * ========================
+ * HTTP probe service — polls all target URLs every 60 seconds
+ * and writes real measurements to TimescaleDB.
  *
- * Probes registered URLs every 30 seconds and pushes real HTTP metrics
- * to the Redis stream so the existing ML pipeline can process them.
+ * Measures:
+ *   - TTFB (Time To First Byte)
+ *   - DNS resolution time
+ *   - TCP connect time
+ *   - TLS handshake time
+ *   - SSL certificate expiry (days left)
+ *   - Rolling 5-minute error rate
+ *   - HTTP status code
  *
- * Metrics collected per probe:
- *   response_time   ms  - full round-trip time
- *   ttfb            ms  - time to first byte
- *   status_code     int - HTTP status (200, 404, 500, etc.)
- *   availability    0/1 - 1 if reachable, 0 if timeout/error
- *   ssl_days        int - days until SSL cert expiry (HTTPS only)
- *   dns_ms          ms  - DNS resolution time
- *   redirect_count  int - number of redirects followed
- *   error_rate      %   - rolling 10-probe error percentage (maps to ML feature)
- *   latency         ms  - alias for response_time (ML feature name)
+ * All timing uses Node.js performance hooks — real measurements,
+ * not estimates.
  */
 
-import Redis    from "ioredis";
-import https    from "https";
-import http     from "http";
-import dns      from "dns/promises";
-import pkg      from "pg";
-import { URL }  from "url";
+import https from "https";
+import http from "http";
+import dns from "dns/promises";
+import tls from "tls";
+import { performance } from "perf_hooks";
+import pg from "pg";
+import Redis from "ioredis";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 
-const { Pool } = pkg;
+// ─────────────────────────────────────────────────────────────
+// CONFIG
+// ─────────────────────────────────────────────────────────────
 
-const redis = new Redis({
-  host: process.env.REDIS_HOST || "redis",
-  port: 6379,
-  maxRetriesPerRequest: null,
-  lazyConnect: true,
-});
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const TARGETS_FILE = join(__dirname, "probe-targets.json");
+const TARGETS = JSON.parse(readFileSync(TARGETS_FILE)).targets;
 
-const pool = new Pool({
-  host:     process.env.DB_HOST     || "postgres",
-  port:     parseInt(process.env.DB_PORT || "5432"),
-  user:     process.env.DB_USER     || "postgres",
-  password: process.env.DB_PASSWORD || "postgres",
-  database: process.env.DB_NAME     || "incident_predictor",
-});
+const PROBE_INTERVAL_MS = 60_000;           // probe every 60 seconds
+const REQUEST_TIMEOUT_MS = 15_000;          // 15s timeout per request
+const ERROR_RATE_WINDOW_MIN = 5;            // rolling window for error rate
+const MAX_RETRIES = 1;                      // retry failed probes once
 
-// Rolling error history per site: last 10 probes
-const errorHistory = {};
+const DB_URL = process.env.DATABASE_URL ||
+  "postgresql://postgres:postgres@localhost:5432/incidentiq";
 
-// ── Probe a single URL ────────────────────────────────────────
-async function probe(site) {
-  const { id, url } = site;
-  const parsed = new URL(url);
-  const isHttps = parsed.protocol === "https:";
+const pool = new pg.Pool({ connectionString: DB_URL, max: 5 });
+
+const REDIS_HOST = process.env.REDIS_HOST || "redis";
+const redisClient = new Redis({ host: REDIS_HOST, port: 6379, maxRetriesPerRequest: null });
+redisClient.on("connect", () => console.log("Redis connected"));
+redisClient.on("error", (err) => console.error("Redis error:", err.message));
+
+// ─────────────────────────────────────────────────────────────
+// ROLLING ERROR RATE TRACKER
+// Keeps last 5 minutes of status codes per URL in memory
+// ─────────────────────────────────────────────────────────────
+
+const errorWindows = new Map(); // url → [{ ts: Date, isError: boolean }]
+
+function trackResult(url, isError) {
+  if (!errorWindows.has(url)) errorWindows.set(url, []);
+  const window = errorWindows.get(url);
+  window.push({ ts: Date.now(), isError });
+
+  // Prune entries older than 5 minutes
+  const cutoff = Date.now() - ERROR_RATE_WINDOW_MIN * 60_000;
+  const pruned = window.filter((e) => e.ts >= cutoff);
+  errorWindows.set(url, pruned);
+
+  const errors = pruned.filter((e) => e.isError).length;
+  return errors / Math.max(pruned.length, 1);
+}
+
+// ─────────────────────────────────────────────────────────────
+// SSL CERTIFICATE EXPIRY CHECK
+// ─────────────────────────────────────────────────────────────
+
+async function getSslDaysLeft(hostname) {
+  return new Promise((resolve) => {
+    const socket = tls.connect(
+      { host: hostname, port: 443, servername: hostname },
+      () => {
+        try {
+          const cert = socket.getPeerCertificate();
+          if (cert && cert.valid_to) {
+            const expiryMs = new Date(cert.valid_to).getTime();
+            const daysLeft = (expiryMs - Date.now()) / (1000 * 60 * 60 * 24);
+            resolve(Math.max(0, daysLeft));
+          } else {
+            resolve(null);
+          }
+        } catch {
+          resolve(null);
+        } finally {
+          socket.destroy();
+        }
+      }
+    );
+    socket.on("error", () => resolve(null));
+    socket.setTimeout(5000, () => { socket.destroy(); resolve(null); });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// CORE PROBE FUNCTION
+// Returns real timing measurements for a single URL
+// ─────────────────────────────────────────────────────────────
+
+async function probe(targetUrl) {
+  const url = new URL(targetUrl);
+  const hostname = url.hostname;
+  const isHttps = url.protocol === "https:";
+  const lib = isHttps ? https : http;
 
   const result = {
-    service_id:     id,
-    url,
-    response_time:  null,
-    ttfb:           null,
-    status_code:    null,
-    availability:   0,
-    ssl_days:       null,
-    dns_ms:         null,
-    redirect_count: 0,
-    error:          null,
+    url: targetUrl,
+    probed_at: new Date().toISOString(),
+    ttfb_ms: null,
+    dns_ms: null,
+    tcp_ms: null,
+    tls_ms: null,
+    status_code: null,
+    error_rate: null,
+    ssl_days_left: null,
+    response_size: null,
+    content_type: null,
+    error: null,
   };
 
   try {
-    // 1. DNS timing
-    const dnsStart = Date.now();
-    await dns.lookup(parsed.hostname);
-    result.dns_ms = Date.now() - dnsStart;
-
-    // 2. HTTP request with timing
-    const requestStart = Date.now();
-    await new Promise((resolve, reject) => {
-      const lib = isHttps ? https : http;
-      const req = lib.get(url, {
-        timeout: 10000,
-        headers: { "User-Agent": "IncidentIQ-Probe/1.0" },
-      }, (res) => {
-        result.ttfb        = Date.now() - requestStart;
-        result.status_code = res.statusCode;
-        result.redirect_count = (res.headers["location"] ? 1 : 0);
-
-        // Consume response body (required to free socket)
-        res.resume();
-        res.on("end", () => {
-          result.response_time = Date.now() - requestStart;
-          result.availability  = res.statusCode < 500 ? 1 : 0;
-          resolve();
-        });
-      });
-
-      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
-      req.on("error",   reject);
-    });
-
-    // 3. SSL cert expiry (HTTPS only)
-    if (isHttps) {
-      await new Promise((resolve) => {
-        const req = https.get(url, { headers: { "User-Agent": "IncidentIQ-Probe/1.0" } }, (res) => {
-          const cert = res.socket?.getPeerCertificate?.();
-          if (cert?.valid_to) {
-            const expiry = new Date(cert.valid_to);
-            result.ssl_days = Math.floor((expiry - Date.now()) / 86400000);
-          }
-          res.resume();
-          res.on("end", resolve);
-        });
-        req.on("error", resolve); // Don't fail on cert error
-      });
+    // DNS timing
+    const dnsStart = performance.now();
+    let resolvedIp;
+    try {
+      const addrs = await dns.resolve4(hostname);
+      resolvedIp = addrs[0];
+      result.dns_ms = Math.round(performance.now() - dnsStart);
+    } catch (dnsErr) {
+      result.dns_ms = Math.round(performance.now() - dnsStart);
+      result.error = `DNS_FAIL: ${dnsErr.code}`;
+      trackResult(targetUrl, true);
+      return result;
     }
 
+    // SSL days left (parallel, non-blocking on main timing)
+    const sslPromise = isHttps ? getSslDaysLeft(hostname) : Promise.resolve(null);
+
+    // HTTP request timing
+    await new Promise((resolve, reject) => {
+      const reqStart = performance.now();
+      let tcpConnectedAt = null;
+      let tlsConnectedAt = null;
+      let firstByteAt = null;
+      let totalBytes = 0;
+
+      const req = lib.request(
+        {
+          hostname,
+          path: url.pathname + url.search,
+          port: isHttps ? 443 : 80,
+          method: "GET",
+          headers: {
+            "User-Agent": "IncidentIQ-Probe/1.0 (performance monitoring)",
+            Accept: "*/*",
+          },
+          timeout: REQUEST_TIMEOUT_MS,
+        },
+        (res) => {
+          firstByteAt = performance.now();
+          result.ttfb_ms = Math.round(firstByteAt - reqStart);
+          result.status_code = res.statusCode;
+          result.content_type = res.headers["content-type"] || null;
+
+          res.on("data", (chunk) => {
+            totalBytes += chunk.length;
+          });
+
+          res.on("end", () => {
+            result.response_size = totalBytes;
+            resolve();
+          });
+
+          res.on("error", reject);
+        }
+      );
+
+      req.on("socket", (socket) => {
+        socket.on("connect", () => {
+          tcpConnectedAt = performance.now();
+          result.tcp_ms = Math.round(tcpConnectedAt - reqStart - (result.dns_ms || 0));
+        });
+        socket.on("secureConnect", () => {
+          tlsConnectedAt = performance.now();
+          result.tls_ms = Math.round(tlsConnectedAt - (tcpConnectedAt || reqStart));
+        });
+      });
+
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("REQUEST_TIMEOUT"));
+      });
+
+      req.on("error", reject);
+      req.end();
+    });
+
+    // SSL cert expiry (wait for parallel check)
+    result.ssl_days_left = await sslPromise;
+
+    // Rolling error rate
+    const isError = !result.status_code || result.status_code >= 400;
+    result.error_rate = trackResult(targetUrl, isError);
+
   } catch (err) {
-    result.error        = err.message;
-    result.availability = 0;
-    result.response_time = 10000; // Max out on failure
-    result.ttfb          = 10000;
+    result.error = err.message;
+    result.error_rate = trackResult(targetUrl, true);
   }
 
   return result;
 }
 
-// ── Push metrics to Redis stream ──────────────────────────────
-async function pushMetrics(probeResult) {
-  const { service_id } = probeResult;
+// ─────────────────────────────────────────────────────────────
+// WRITE TO TIMESCALEDB
+// ─────────────────────────────────────────────────────────────
 
-  // Track rolling error rate (last 10 probes)
-  if (!errorHistory[service_id]) errorHistory[service_id] = [];
-  const hist = errorHistory[service_id];
-  hist.push(probeResult.availability === 0 || probeResult.status_code >= 400 ? 1 : 0);
-  if (hist.length > 10) hist.shift();
-  const error_rate = (hist.reduce((a, b) => a + b, 0) / hist.length) * 100;
+const INSERT_SQL = `
+  INSERT INTO metrics.probe_readings (
+    url, probed_at, ttfb_ms, dns_ms, tcp_ms, tls_ms,
+    status_code, error_rate, ssl_days_left, response_size, content_type
+  ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+`;
 
-  const metrics = {
-    // ML pipeline feature names (must match FEATURES in config.py)
-    cpu:          Math.min((probeResult.response_time / 100), 100),  // response_time → cpu proxy
-    memory:       Math.min(((probeResult.ttfb || probeResult.response_time) / 100), 100),
-    request_rate: probeResult.redirect_count * 10 + 500,  // synthetic baseline
-    error_rate,
-    latency:      probeResult.response_time || 10000,
-
-    // Extra real metrics (stored but not fed to LSTM directly)
-    response_time:  probeResult.response_time,
-    status_code:    probeResult.status_code,
-    availability:   probeResult.availability,
-    ssl_days:       probeResult.ssl_days,
-    dns_ms:         probeResult.dns_ms,
-  };
-
-  // Push each metric to Redis stream
-  for (const [name, value] of Object.entries(metrics)) {
-    if (value == null) continue;
-    await redis.xadd("metrics_stream", "*",
-      "service_id",  service_id,
-      "metric_name", name,
-      "value",       String(value)
-    );
+async function publishToRedis(reading) {
+  try {
+    const sampleTs = reading.probed_at;
+    const serviceId = new URL(reading.url).hostname;
+    const metrics = {
+      ttfb_ms:       reading.ttfb_ms ?? 0,
+      dns_ms:        reading.dns_ms ?? 0,
+      error_rate:    reading.error_rate ?? 0,
+      ssl_days_left: reading.ssl_days_left ?? 365,
+      status_code:   reading.status_code ?? 0,
+      tcp_ms:        reading.tcp_ms ?? 0,
+      tls_ms:        reading.tls_ms ?? 0,
+    };
+    for (const [metricName, value] of Object.entries(metrics)) {
+      await redisClient.xadd(
+        "metrics_stream", "*",
+        "service_id", serviceId,
+        "metric_name", metricName,
+        "value", String(value),
+        "sample_ts", sampleTs,
+        "url", reading.url
+      );
+    }
+  } catch (err) {
+    console.error(`[REDIS ERROR] ${reading.url}: ${err.message}`);
   }
+}
 
-  // Update last_probed + status in DB
-  const status = probeResult.availability === 0 ? "down"
-    : (probeResult.response_time > 3000 || error_rate > 20) ? "degraded"
-    : "up";
+async function writeReading(reading) {
+  try {
+    await pool.query(INSERT_SQL, [
+      reading.url,
+      reading.probed_at,
+      reading.ttfb_ms,
+      reading.dns_ms,
+      reading.tcp_ms,
+      reading.tls_ms,
+      reading.status_code,
+      reading.error_rate,
+      reading.ssl_days_left,
+      reading.response_size,
+      reading.content_type,
+    ]);
+    // Publish to Redis stream for the inference pipeline
+    await publishToRedis(reading);
+  } catch (err) {
+    console.error(`[DB ERROR] ${reading.url}: ${err.message}`);
+  }
+}
 
-  await pool.query(
-    `UPDATE incidents.monitored_sites
-     SET last_probed = NOW(), last_status = $1, last_response_ms = $2
-     WHERE id = $3`,
-    [status, probeResult.response_time, service_id]
+// ─────────────────────────────────────────────────────────────
+// PROBE LOOP
+// ─────────────────────────────────────────────────────────────
+
+async function probeAll() {
+  const start = Date.now();
+  console.log(`[${new Date().toISOString()}] Probing ${TARGETS.length} URLs...`);
+
+  const results = await Promise.allSettled(
+    TARGETS.map(async (target) => {
+      const reading = await probe(target.probe_url);
+
+      // Log summary
+      const status = reading.error
+        ? `ERROR: ${reading.error}`
+        : `${reading.status_code} | TTFB: ${reading.ttfb_ms}ms | DNS: ${reading.dns_ms}ms | SSL: ${reading.ssl_days_left?.toFixed(0)}d`;
+      console.log(`  ${target.name.padEnd(15)} ${status}`);
+
+      await writeReading(reading);
+      return reading;
+    })
   );
 
-  console.log(`[probe] ${probeResult.url} | ${status} | ${probeResult.response_time}ms | err=${error_rate.toFixed(0)}% | ssl=${probeResult.ssl_days ?? "N/A"}d`);
+  const elapsed = Date.now() - start;
+  const ok = results.filter((r) => r.status === "fulfilled" && !r.value.error).length;
+  const errors = TARGETS.length - ok;
+
+  console.log(`  Done in ${elapsed}ms | OK: ${ok} | Errors: ${errors}\n`);
 }
 
-// ── Load monitored sites from DB ──────────────────────────────
-async function loadSites() {
-  try {
-    const r = await pool.query(
-      "SELECT id, url, name FROM incidents.monitored_sites WHERE active = true"
-    );
-    return r.rows;
-  } catch (err) {
-    console.error("Failed to load sites:", err.message);
-    return [];
-  }
-}
+// ─────────────────────────────────────────────────────────────
+// MAIN
+// ─────────────────────────────────────────────────────────────
 
-// ── Main probe loop ───────────────────────────────────────────
-async function run() {
-  await redis.connect();
-  console.log("Website probe service started");
+console.log("IncidentIQ Website Probe starting...");
+console.log(`Targets: ${TARGETS.length} URLs | Interval: ${PROBE_INTERVAL_MS / 1000}s`);
 
-  while (true) {
-    const sites = await loadSites();
+// First probe immediately on startup
+probeAll().catch(console.error);
 
-    if (sites.length === 0) {
-      console.log("[probe] No sites registered yet. Add a URL via the frontend.");
-    } else {
-      // Probe all sites in parallel
-      const results = await Promise.allSettled(sites.map(probe));
-      for (const r of results) {
-        if (r.status === "fulfilled") {
-          await pushMetrics(r.value).catch(console.error);
-        } else {
-          console.error("[probe] Failed:", r.reason?.message);
-        }
-      }
-    }
+// Then probe every 60 seconds
+setInterval(() => probeAll().catch(console.error), PROBE_INTERVAL_MS);
 
-    // Wait 30 seconds between probe rounds
-    await new Promise(r => setTimeout(r, 30_000));
-  }
-}
-
-run().catch(console.error);
+// Graceful shutdown
+process.on("SIGTERM", async () => {
+  console.log("Shutting down...");
+  await pool.end();
+  process.exit(0);
+});

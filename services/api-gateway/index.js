@@ -63,20 +63,28 @@ app.use("/api/sites",       authMiddleware, sitesRouter);
 
 app.get("/api/metrics/live", authMiddleware, async (req, res) => {
   try {
-    const { service_id = "service-a", limit = 60 } = req.query;
-    const result = await pool.query(
-      `SELECT time_bucket('10 seconds', time) as bucket, metric_name, AVG(value) as value
-       FROM metrics.raw_metrics
-       WHERE service_id=$1 AND time > NOW()-INTERVAL '15 minutes'
-       GROUP BY bucket, metric_name ORDER BY bucket ASC`,
-      [service_id]
-    );
-    const buckets = {};
-    for (const row of result.rows) {
-      if (!buckets[row.bucket]) buckets[row.bucket] = { time: row.bucket };
-      buckets[row.bucket][row.metric_name] = parseFloat(row.value);
+    const { url, limit = 60 } = req.query;
+    let result;
+    if (url) {
+      result = await pool.query(
+        `SELECT probed_at as time, ttfb_ms, dns_ms, tcp_ms, tls_ms, error_rate, ssl_days_left, status_code
+         FROM metrics.probe_readings
+         WHERE url=$1 AND probed_at > NOW()-INTERVAL '15 minutes'
+         ORDER BY probed_at ASC
+         LIMIT $2`,
+        [url, parseInt(limit)]
+      );
+    } else {
+      result = await pool.query(
+        `SELECT probed_at as time, url, ttfb_ms, dns_ms, tcp_ms, tls_ms, error_rate, ssl_days_left, status_code
+         FROM metrics.probe_readings
+         WHERE probed_at > NOW()-INTERVAL '15 minutes'
+         ORDER BY probed_at ASC
+         LIMIT $1`,
+        [parseInt(limit)]
+      );
     }
-    res.json({ metrics: Object.values(buckets).slice(-parseInt(limit)) });
+    res.json({ metrics: result.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -85,9 +93,9 @@ app.get("/api/metrics/live", authMiddleware, async (req, res) => {
 app.get("/api/services", authMiddleware, async (req, res) => {
   try {
     const r = await pool.query(
-      `SELECT DISTINCT service_id, MAX(time) as last_seen, COUNT(*) as metric_count
-       FROM metrics.raw_metrics WHERE time > NOW()-INTERVAL '1 hour'
-       GROUP BY service_id`
+      `SELECT DISTINCT url, MAX(probed_at) as last_seen, COUNT(*) as metric_count
+       FROM metrics.probe_readings WHERE probed_at > NOW()-INTERVAL '1 hour'
+       GROUP BY url ORDER BY last_seen DESC`
     );
     res.json({ services: r.rows });
   } catch (err) {

@@ -28,6 +28,7 @@ router.get("/", async (req, res) => {
               COUNT(i.id) FILTER (WHERE i.severity='critical') AS critical_incidents
        FROM incidents.monitored_sites s
        LEFT JOIN incidents.incidents i ON i.service_id = s.id
+       WHERE s.active = TRUE
        GROUP BY s.id
        ORDER BY s.created_at DESC`
     );
@@ -70,16 +71,43 @@ router.post("/", async (req, res) => {
   }
 });
 
-// DELETE /api/sites/:id — stop monitoring a site
+// DELETE /api/sites/:id — remove a monitored site and its data
 router.delete("/:id", async (req, res) => {
+  const client = await pool.connect();
   try {
-    await pool.query(
-      "UPDATE incidents.monitored_sites SET active = FALSE WHERE id = $1",
+    await client.query("BEGIN");
+    // Remove remediations linked to this site's incidents
+    await client.query(
+      "DELETE FROM incidents.remediations WHERE service_id = $1",
       [req.params.id]
     );
+    // Remove incidents
+    await client.query(
+      "DELETE FROM incidents.incidents WHERE service_id = $1",
+      [req.params.id]
+    );
+    // Remove predictions
+    await client.query(
+      "DELETE FROM ml.predictions WHERE service_id = $1",
+      [req.params.id]
+    );
+    // Remove raw metrics
+    await client.query(
+      "DELETE FROM metrics.raw_metrics WHERE service_id = $1",
+      [req.params.id]
+    );
+    // Remove the site itself
+    await client.query(
+      "DELETE FROM incidents.monitored_sites WHERE id = $1",
+      [req.params.id]
+    );
+    await client.query("COMMIT");
     res.json({ ok: true });
   } catch (err) {
+    await client.query("ROLLBACK");
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -92,10 +120,10 @@ router.get("/:id/metrics", async (req, res) => {
               metric_name, AVG(value) AS value
        FROM metrics.raw_metrics
        WHERE service_id = $1 AND time > NOW() - INTERVAL '30 minutes'
+         AND metric_name IN ('ttfb_ms', 'dns_ms', 'error_rate', 'response_time_ms', 'latency', 'availability', 'status_code')
        GROUP BY bucket, metric_name
-       ORDER BY bucket ASC
-       LIMIT $2`,
-      [req.params.id, parseInt(limit)]
+       ORDER BY bucket ASC`,
+      [req.params.id]
     );
 
     // Pivot to [{time, response_time, error_rate, ...}]
@@ -105,7 +133,8 @@ router.get("/:id/metrics", async (req, res) => {
       buckets[row.bucket][row.metric_name] = parseFloat(row.value);
     }
 
-    res.json({ metrics: Object.values(buckets) });
+    const rows = Object.values(buckets).slice(-parseInt(limit));
+    res.json({ metrics: rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -15,15 +15,14 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
 # =========================
 
 FEATURES = [
-    "cpu",
-    "memory",
-    "request_rate",
+    "ttfb_ms",
+    "dns_ms",
     "error_rate",
-    "latency"
+    "ssl_days_left"
 ]
 
-INPUT_WINDOW = 20
-OUTPUT_WINDOW = 10
+INPUT_WINDOW = 60
+OUTPUT_WINDOW = 30
 
 # =========================
 # Training Parameters

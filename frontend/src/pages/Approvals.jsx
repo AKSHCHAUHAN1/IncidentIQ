@@ -66,7 +66,7 @@ export default function Approvals() {
       <motion.main initial={{ opacity: 0 }} animate={{ opacity: 1 }}
         className="relative z-10 pt-32 px-10 max-w-4xl mx-auto flex flex-col items-center justify-center h-[60vh] gap-4">
         <CheckCircle className="text-green-500 w-12 h-12 opacity-50" />
-        <p className="text-gray-500 font-mono uppercase tracking-widest">No pending remediations.</p>
+        <p className="text-gray-500 font-mono uppercase tracking-widest">No pending alert dispatches.</p>
         <button onClick={fetchApprovals} className="text-xs text-gray-600 hover:text-gray-400 flex items-center gap-2 transition-colors">
           <RefreshCw size={12} /> Refresh
         </button>
@@ -80,7 +80,7 @@ export default function Approvals() {
 
       <div className="flex items-center gap-4 mb-10">
         <ShieldAlert className="text-amber-500 w-8 h-8 drop-shadow-[0_0_15px_rgba(245,158,11,0.5)]" />
-        <h1 className="text-3xl font-bold tracking-tighter">Pending Remediations</h1>
+        <h1 className="text-3xl font-bold tracking-tighter">Pending Alert Reports</h1>
         <span className="bg-red-500/20 border border-red-500/30 text-red-400 text-xs px-2 py-1 rounded-full font-bold font-mono">
           {approvals.length}
         </span>
@@ -107,8 +107,8 @@ export default function Approvals() {
                 {isDone ? (
                   <div className="flex flex-col items-center py-8 gap-4">
                     <CheckCircle className="text-green-500 w-12 h-12 animate-pulse drop-shadow-[0_0_15px_rgba(34,197,94,0.5)]" />
-                    <h2 className="text-2xl font-bold text-green-400 tracking-tighter">Executing Remediation</h2>
-                    <p className="text-gray-400 mt-2 font-mono text-sm">Restart initiated on {approval.service_id}</p>
+                    <h2 className="text-2xl font-bold text-green-400 tracking-tighter">Dispatching Alert Report</h2>
+                    <p className="text-gray-400 mt-2 font-mono text-sm">Incident report dispatched for {approval.service_id}</p>
                   </div>
                 ) : (
                   <>
@@ -135,8 +135,8 @@ export default function Approvals() {
                       <div className="metal-surface p-6">
                         <h3 className="text-xs text-gray-500 uppercase tracking-widest mb-3 font-mono">Why this action?</h3>
                         <p className="text-gray-300 italic border-l-2 border-indigo/50 pl-4 bg-gradient-to-r from-indigo/5 to-transparent py-2">
-                          "Metrics exceeded safe thresholds with {conf}% confidence. Historical data shows
-                          restart resolves this pattern with high success rate."
+                          "Metrics indicate likely SLA degradation with {conf}% confidence. Approving will
+                          dispatch the structured incident report and escalation alert."
                         </p>
                       </div>
                     </div>
@@ -179,7 +179,7 @@ export default function Approvals() {
 
                       <MagicButton onClick={() => handleApprove(approval)} disabled={isWorking}>
                         <span className="font-bold text-sm text-white drop-shadow-[0_0_8px_rgba(99,102,241,0.8)]">
-                          {state === 'approving' ? 'Executing...' : 'Approve & Execute'}
+                          {state === 'approving' ? 'Dispatching...' : 'Approve & Dispatch'}
                         </span>
                       </MagicButton>
                     </div>

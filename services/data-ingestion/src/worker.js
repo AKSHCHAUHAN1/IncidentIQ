@@ -1,20 +1,77 @@
 import { redis } from "./redis.js";
 import { pool } from "./postgres.js";
-import { writeToVictoria } from "./victoria.js";
 import fetch from "node-fetch";
 
-const ML_URL = process.env.ML_URL || "http://ml-service:8000/predict";
+const ML_URL = process.env.ML_URL || "http://ml-service:8000/ensemble";
 const DECISION_URL = process.env.DECISION_URL || "http://decision-engine:5000/evaluate";
-const INPUT_WINDOW = parseInt(process.env.INPUT_WINDOW || "20");
+const INPUT_WINDOW = parseInt(process.env.INPUT_WINDOW || "60", 10);
+
+const REQUIRED_METRICS = ["ttfb_ms", "dns_ms", "error_rate", "ssl_days_left"];
 
 let running = true;
 
-// sliding window per service
+// Sliding window + probe-sample assembler per service
 const serviceBuffers = new Map();
+
+function getState(serviceId) {
+  if (!serviceBuffers.has(serviceId)) {
+    serviceBuffers.set(serviceId, {
+      sampleTs: null,
+      currentSample: {},
+      lastDispatchedSampleTs: null,
+      window: [],
+      lastSnapshot: {},
+      url: null,
+    });
+  }
+  return serviceBuffers.get(serviceId);
+}
+
+function buildMetricText(metrics) {
+  const ttfb = metrics.ttfb_ms ?? 0;
+  const dns = metrics.dns_ms ?? 0;
+  const errorRate = metrics.error_rate ?? 0;
+  const ssl = metrics.ssl_days_left ?? 365;
+  const status = metrics.status_code ?? 200;
+
+  const tokens = [];
+
+  if (ttfb < 250) tokens.push("ttfb_fast");
+  else if (ttfb < 800) tokens.push("ttfb_moderate");
+  else if (ttfb < 1500) tokens.push("ttfb_slow");
+  else tokens.push("ttfb_very_slow");
+
+  if (dns < 40) tokens.push("dns_fast");
+  else if (dns < 120) tokens.push("dns_moderate");
+  else if (dns < 300) tokens.push("dns_slow");
+  else tokens.push("dns_very_slow");
+
+  const ratio = ttfb / Math.max(dns, 1);
+  if (ratio < 3) tokens.push("ratio_dns_dominant");
+  else if (ratio < 7) tokens.push("ratio_balanced");
+  else tokens.push("ratio_origin_dominant");
+
+  if (errorRate < 1) tokens.push("errors_clean");
+  else if (errorRate < 5) tokens.push("errors_low");
+  else if (errorRate < 15) tokens.push("errors_high");
+  else tokens.push("errors_critical");
+
+  if (ssl < 7) tokens.push("ssl_critical");
+  else if (ssl < 14) tokens.push("ssl_warning");
+  else if (ssl < 30) tokens.push("ssl_soon");
+  else tokens.push("ssl_ok");
+
+  if (status >= 500) tokens.push("status_server_error");
+  else if (status >= 400) tokens.push("status_client_error");
+  else tokens.push("status_ok");
+
+  return tokens.join(" ");
+}
 
 export async function startWorker() {
   console.log("Starting ingestion worker...");
 
+  // Create consumer group (ignore error if already exists)
   await redis
     .xgroup("CREATE", "metrics_stream", "group1", "$", "MKSTREAM")
     .catch(() => {});
@@ -33,79 +90,87 @@ export async function startWorker() {
       const [, messages] = response[0];
 
       for (const [id, fields] of messages) {
+        // Parse flat field array into object
         const obj = {};
         for (let i = 0; i < fields.length; i += 2) {
           obj[fields[i]] = fields[i + 1];
         }
 
+        const numericValue = parseFloat(obj.value);
+        if (Number.isNaN(numericValue)) {
+          await redis.xack("metrics_stream", "group1", id);
+          continue;
+        }
+
+        const sampleTs = obj.sample_ts || new Date().toISOString();
+        const metricTime = new Date(sampleTs);
+
         const metric = {
-          time: new Date(),
+          time: Number.isNaN(metricTime.getTime()) ? new Date() : metricTime,
           service_id: obj.service_id,
           metric_name: obj.metric_name,
-          value: parseFloat(obj.value),
+          value: numericValue,
+          sample_ts: sampleTs,
+          url: obj.url || null,
         };
 
-        // Store in DB
-        await pool.query(
-          `INSERT INTO metrics.raw_metrics(time, service_id, metric_name, value)
-           VALUES($1, $2, $3, $4)`,
-          [metric.time, metric.service_id, metric.metric_name, metric.value]
-        );
+        // Write complete samples to probe_readings (handled below after assembly)
+        // Individual metrics are accumulated in the buffer first
 
-        // FIX: Victoria failure is non-fatal
-        try {
-          await writeToVictoria(metric);
-        } catch (err) {
-          console.warn("Victoria write failed:", err.message);
+        if (!metric.service_id || !metric.metric_name) {
+          await redis.xack("metrics_stream", "group1", id);
+          continue;
         }
 
-        // ===== ML FEATURE BUFFER =====
-        if (!serviceBuffers.has(metric.service_id)) {
-          serviceBuffers.set(metric.service_id, {});
+        const state = getState(metric.service_id);
+
+        if (state.sampleTs !== metric.sample_ts) {
+          state.sampleTs = metric.sample_ts;
+          state.currentSample = {};
         }
 
-        const state = serviceBuffers.get(metric.service_id);
-        state[metric.metric_name] = metric.value;
+        if (metric.url) state.url = metric.url;
+        state.currentSample[metric.metric_name] = metric.value;
 
-        const required = ["cpu", "memory", "request_rate", "error_rate", "latency"];
-        const ready = required.every(k => state[k] !== undefined);
+        const isReady = REQUIRED_METRICS.every((k) => state.currentSample[k] !== undefined);
+        const notYetDispatched = state.lastDispatchedSampleTs !== metric.sample_ts;
 
-        if (ready) {
-          if (!state.window) state.window = [];
+        if (isReady && notYetDispatched) {
+          const row = REQUIRED_METRICS.map((k) => state.currentSample[k] ?? 0);
+          state.window.push(row);
+          if (state.window.length > INPUT_WINDOW) state.window.shift();
 
-          const featureVector = [
-            state.cpu,
-            state.memory,
-            state.request_rate,
-            state.error_rate,
-            state.latency
-          ];
-
-          state.window.push(featureVector);
-
-          if (state.window.length > INPUT_WINDOW) {
-            state.window.shift();
-          }
+          state.lastSnapshot = {
+            ...state.currentSample,
+            status_code: state.currentSample.status_code || 200,
+            availability: state.currentSample.availability ?? 1,
+          };
 
           if (state.window.length === INPUT_WINDOW) {
-            await triggerPrediction(metric.service_id, state.window, state);
+            const metricText = buildMetricText(state.lastSnapshot);
+            await triggerPrediction(metric.service_id, state.window, state.lastSnapshot, metricText);
           }
+
+          state.lastDispatchedSampleTs = metric.sample_ts;
         }
 
         await redis.xack("metrics_stream", "group1", id);
       }
     } catch (err) {
-      console.error("Worker error:", err.message);
+      console.error("Worker error:", err?.message || err?.code || String(err));
     }
   }
 }
 
-async function triggerPrediction(serviceId, window, state) {
+async function triggerPrediction(serviceId, window, snapshot, metricText) {
   try {
     const res = await fetch(ML_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data: window }),
+      body: JSON.stringify({
+        metrics_window: window,
+        log_text: metricText,
+      }),
     });
 
     if (!res.ok) {
@@ -114,27 +179,25 @@ async function triggerPrediction(serviceId, window, state) {
     }
 
     const result = await res.json();
-    console.log("Prediction for", serviceId, result);
+    console.log("Prediction for", serviceId, {
+      severity: result.severity,
+      confidence: result.confidence,
+      root_cause: result.root_cause,
+      breach_eta_min: result.breach_eta_min,
+    });
 
-    // FIX: use env var instead of hardcoded URL
     await fetch(DECISION_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        service_id: serviceId,
-        prediction: result,
-        current_metrics: {
-          cpu: state.cpu,
-          memory: state.memory,
-          request_rate: state.request_rate,
-          error_rate: state.error_rate,
-          latency: state.latency
-        }
+        service_id:      serviceId,
+        prediction:      result,
+        current_metrics: snapshot,
+        metric_text: metricText,
       }),
     });
-
   } catch (err) {
-    console.error("Prediction error:", err.message);
+    console.error("Prediction error:", err?.message || String(err));
   }
 }
 

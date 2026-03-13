@@ -25,10 +25,10 @@ const StatCard = ({ icon, label, value, sub, color = 'text-white' }) => (
 );
 
 const MODEL_ROWS = [
-  { name: 'LSTM Predictor',   type: 'Forecasting',       key: 'lstm_loaded',  note: 'Z-score normalized, per-service baseline' },
+  { name: 'LSTM Predictor',   type: 'TTFB Forecasting',  key: 'lstm_loaded',  note: 'Z-score normalized SLA trajectory model' },
   { name: 'Isolation Forest', type: 'Anomaly Detection', key: 'iso_loaded',   note: '300 trees, 5% contamination' },
-  { name: 'Log Classifier',   type: 'Log Analysis',      key: 'log_loaded',   note: 'TF-IDF + Logistic Regression' },
-  { name: 'Ensemble Fusion',  type: 'Multi-model Fusion',key: 'ensemble',     note: 'LSTM + IsoForest + LogCLF combined' },
+  { name: 'Pattern Classifier', type: 'Root Cause',      key: 'log_loaded',   note: 'TF-IDF + Logistic Regression on metric tokens' },
+  { name: 'Ensemble Fusion',  type: 'Multi-model Fusion',key: 'ensemble',     note: 'LSTM + Isolation Forest + Pattern classifier' },
 ];
 
 export default function Analytics() {
@@ -69,24 +69,24 @@ export default function Analytics() {
   const topStats = summary ? [
     {
       icon:  <TrendingUp size={14} />,
-      label: 'Prediction Accuracy',
-      value: `${summary.predictions?.accuracy_pct ?? 0}%`,
+      label: 'Avg Prediction Confidence',
+      value: `${summary.predictions?.confidence_avg_pct ?? 0}%`,
       sub:   `${summary.predictions?.total ?? 0} total predictions`,
-      color: (summary.predictions?.accuracy_pct ?? 0) > 70 ? 'text-green-400' : 'text-amber-400',
+      color: (summary.predictions?.confidence_avg_pct ?? 0) > 70 ? 'text-green-400' : 'text-amber-400',
     },
     {
       icon:  <Zap size={14} />,
-      label: 'Auto-Resolved',
-      value: String(summary.remediations?.auto_executed ?? 0),
-      sub:   'incidents auto-remediated',
+      label: 'Reports Dispatched',
+      value: String(summary.remediations?.alert_reports ?? 0),
+      sub:   'structured alert dispatches',
       color: 'text-indigo-400',
     },
     {
       icon:  <BarChart2 size={14} />,
-      label: 'Incidents Prevented',
-      value: String(summary.incidents?.prevented ?? 0),
-      sub:   `of ${summary.incidents?.total ?? 0} total`,
-      color: 'text-green-400',
+      label: 'SLA Compliance (24h)',
+      value: `${summary.sla?.compliance_pct ?? 0}%`,
+      sub:   `${summary.sla?.last_24h_breaches ?? 0} breaches over ${summary.sla?.last_24h_total ?? 0} probes`,
+      color: (summary.sla?.compliance_pct ?? 0) > 95 ? 'text-green-400' : 'text-amber-400',
     },
     {
       icon:  <Clock size={14} />,
