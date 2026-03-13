@@ -200,21 +200,6 @@ services:
       redis:    { condition: service_healthy }
     restart: unless-stopped
 
-  # ── Synthetic Generator (dev only) ───────────────────────────
-  # Only starts with: docker compose --profile dev up
-  # Kept for testing the approval/alert UI without waiting for real anomalies.
-  synthetic-generator:
-    build:
-      context: ./services/synthetic-generator
-      dockerfile: Dockerfile
-    environment:
-      REDIS_HOST: redis
-      MODE: mixed
-    depends_on:
-      redis: { condition: service_healthy }
-    restart: unless-stopped
-    profiles:
-      - dev
 
 volumes:
   postgres_data:
