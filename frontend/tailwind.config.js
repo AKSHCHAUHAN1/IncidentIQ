@@ -4,17 +4,17 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: "#050505", // Deep cinematic black
+        background: "#050505",
         surface: "rgba(20, 20, 20, 0.4)",
         border: "rgba(255, 255, 255, 0.08)",
-        indigo: "#6366f1", // Accent color [cite: 1226]
-        critical: "#ef4444", // Red alerts [cite: 1226]
+        indigo: "#6366f1", 
+        critical: "#ef4444", 
       },
       fontFamily: {
-        sans: ['Inter', 'sans-serif'], // Professional SaaS font [cite: 1228]
+        sans: ['Inter', 'sans-serif'],
       },
       letterSpacing: {
-        tighter: '-0.02em', // Awwwards editorial feel
+        tighter: '-0.02em', 
       },
       backgroundImage: {
         'glass-gradient': 'linear-gradient(145deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.01) 100%)',

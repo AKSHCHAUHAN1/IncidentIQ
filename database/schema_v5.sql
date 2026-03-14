@@ -1,16 +1,10 @@
--- ============================================================
--- Schema v5 — Web performance anomaly pipeline
--- Run AFTER schema_v2.sql, schema_v3.sql, schema_v4.sql
--- ============================================================
-
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 CREATE SCHEMA IF NOT EXISTS metrics;
 CREATE SCHEMA IF NOT EXISTS ml;
 
--- ------------------------------------------------------------------
 -- High-fidelity probe readings (TTFB, DNS, TLS, SSL, error profile)
--- ------------------------------------------------------------------
+
 CREATE TABLE IF NOT EXISTS metrics.probe_readings (
     id                  BIGSERIAL,
     url                 TEXT NOT NULL,
@@ -50,9 +44,7 @@ CREATE INDEX IF NOT EXISTS idx_probe_service_time
 CREATE INDEX IF NOT EXISTS idx_probe_time
     ON metrics.probe_readings (probed_at DESC);
 
--- ------------------------------------------------------------------
--- Baselines + labels for pivot training pipeline
--- ------------------------------------------------------------------
+
 CREATE TABLE IF NOT EXISTS ml.url_baselines (
     url                         TEXT PRIMARY KEY,
     ttfb_p75_ms                 FLOAT,

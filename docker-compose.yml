@@ -29,9 +29,7 @@ services:
       retries: 5
 
   # ── Website Probe ────────────────────────────────────────────
-  # Probes all URLs in probe-targets.json every 60 seconds.
   # Writes real TTFB, DNS, TLS, SSL, error_rate to TimescaleDB.
-  # This is the PRIMARY data source for all three ML models.
   website-probe:
     build:
       context: ./services/website-probe
@@ -51,11 +49,7 @@ services:
     restart: unless-stopped
 
   # ── Data Collector ────────────────────────────────────────────
-  # Runs two scheduled jobs:
-  #   1. fetch_crux_baselines.py  — daily, fetches Google CrUX real P75 baselines
-  #   2. fetch_status_incidents.py — every 6 hours, fetches real incidents from
-  #      public status pages (GitHub, Stripe, Cloudflare, Vercel, npm, etc.)
-  # These provide the ground-truth labels for the ML training pipeline.
+  #  public status pages (GitHub, Stripe, Cloudflare, Vercel, npm, etc.)
   data-collector:
     build:
       context: ./services/data-ingestion
@@ -66,7 +60,6 @@ services:
       DB_USER:        postgres
       DB_PASSWORD:    postgres
       DB_NAME:        incident_predictor
-      # How often to re-fetch (in hours). CrUX changes slowly so daily is fine.
       CRUX_INTERVAL_HOURS:    24
       STATUS_INTERVAL_HOURS:  6
       # Optional: speeds up CrUX fetching from 150/day to 150/100s
@@ -80,10 +73,6 @@ services:
     restart: unless-stopped
 
   # ── ML Labeler ────────────────────────────────────────────────
-  # Runs label_probe_data.py every 6 hours.
-  # Cross-references probe readings with status page incident windows
-  # and programmatic z-score rules → writes to ml.labeled_probe_readings.
-  # Only starts producing useful output after 7+ days of probe data.
   ml-labeler:
     build:
       context: ./services/ml-service
@@ -111,8 +100,6 @@ services:
     restart: unless-stopped
 
   # ── ML Service ────────────────────────────────────────────────
-  # FastAPI server — loads trained models and serves predictions.
-  # Also exposes /train endpoint to trigger retraining manually.
   ml-service:
     build:
       context: ./services/ml-service
@@ -134,8 +121,6 @@ services:
     restart: unless-stopped
 
   # ── Data Ingestion ────────────────────────────────────────────
-  # Reads from Redis streams, calls ML service for predictions,
-  # forwards results to decision engine.
   data-ingestion:
     build:
       context: ./services/data-ingestion
@@ -156,11 +141,6 @@ services:
     restart: unless-stopped
 
   # ── Decision Engine ───────────────────────────────────────────
-  # Evaluates ML predictions, scores confidence, triggers alerts.
-  # NOTE: No more auto-remediation. Actions are now:
-  #   ≥90% confidence → auto-send alert + generate incident report
-  #   70-89%          → flag for review in dashboard
-  #   <70%            → log only
   decision-engine:
     build:
       context: ./services/decision-engine

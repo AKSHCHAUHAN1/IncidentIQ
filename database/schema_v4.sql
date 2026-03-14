@@ -1,12 +1,7 @@
--- ============================================================
--- Schema v4 — Website monitoring
--- Run AFTER schema_v2.sql and schema_v3.sql
--- ============================================================
-
 CREATE TABLE IF NOT EXISTS incidents.monitored_sites (
-    id               TEXT PRIMARY KEY,          -- slug: "github-com"
+    id               TEXT PRIMARY KEY,          
     url              TEXT NOT NULL UNIQUE,
-    name             TEXT NOT NULL,             -- display name
+    name             TEXT NOT NULL,            
     active           BOOLEAN DEFAULT TRUE,
     created_at       TIMESTAMPTZ DEFAULT NOW(),
     last_probed      TIMESTAMPTZ,

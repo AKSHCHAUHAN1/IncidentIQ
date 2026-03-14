@@ -1,8 +1,3 @@
--- ============================================================
--- Schema v2 — Month 4 additions
--- Run ONCE: docker compose exec postgres psql -U postgres -d incident_predictor -f /docker-entrypoint-initdb.d/schema_v2.sql
--- ============================================================
-
 -- ── Predictions log ─────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS ml.predictions (
     id            TEXT PRIMARY KEY,

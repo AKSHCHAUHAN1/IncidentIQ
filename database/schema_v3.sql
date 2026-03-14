@@ -1,18 +1,8 @@
--- ============================================================
--- Schema v3 — pgvector similarity search
--- Run: docker compose exec postgres psql -U postgres -d incident_predictor -f /tmp/schema_v3.sql
--- ============================================================
-
--- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Incident embeddings table
--- Each incident gets a 5-dimensional embedding from its metrics snapshot
--- (cpu, memory, request_rate, error_rate, latency)
--- pgvector finds the most similar past incidents using cosine distance
 CREATE TABLE IF NOT EXISTS incidents.incident_embeddings (
     id           TEXT PRIMARY KEY REFERENCES incidents.incidents(id) ON DELETE CASCADE,
-    embedding    vector(5),           -- normalized metric vector
+    embedding    vector(5),          
     service_id   TEXT,
     severity     TEXT,
     created_at   TIMESTAMPTZ DEFAULT NOW()
@@ -24,8 +14,6 @@ CREATE INDEX IF NOT EXISTS idx_embeddings_vector
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 10);
 
--- Function to auto-generate embedding when incident is created
--- Pulls from metrics_snapshot JSONB column
 CREATE OR REPLACE FUNCTION incidents.generate_embedding(incident_id TEXT)
 RETURNS void AS $$
 DECLARE
@@ -49,8 +37,6 @@ BEGIN
     err := COALESCE((snap->>'error_rate')::float,   0);
     lat := COALESCE((snap->>'latency')::float,      0);
 
-    -- Normalize each metric to 0-1 range using known max values
-    -- This makes the cosine similarity meaningful across different scales
     vec := ARRAY[
         LEAST(cpu / 100.0,  1.0),
         LEAST(mem / 100.0,  1.0),
@@ -66,7 +52,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Backfill embeddings for existing incidents
 DO $$
 DECLARE r RECORD;
 BEGIN

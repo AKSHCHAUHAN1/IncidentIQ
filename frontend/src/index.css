@@ -42,9 +42,7 @@
   .tech-border::after { bottom: -2px; right: -2px; }
 }
 
-@layer utilities {
-  /* ... (Keeping your existing metal-container and replica-3d-card classes intact for other components) ... */
-  
+@layer utilities {  
   .metal-container { position: relative; border-radius: var(--m-radius, 9999px); padding: var(--m-border, 1px); background: transparent; overflow: hidden; z-index: 1; }
   .metal-container::before { content: ''; position: absolute; top: 50%; left: 50%; width: 250%; height: 250%; background: conic-gradient(from 0deg, transparent 0%, transparent 15%, rgba(125, 211, 252, 0.5) 21%, #ffffff 23%, #3b82f6 25%, #0f172a 27%, transparent 32%, transparent 65%, rgba(244, 114, 182, 0.3) 71%, #ffffff 73%, #8b5cf6 75%, #1e1b4b 77%, transparent 82%, transparent 100%); transform: translate(-50%, -50%); animation: spin-metal 5s linear infinite; z-index: -1; }
   .metal-container-static { position: relative; border-radius: var(--m-radius, 9999px); padding: var(--m-border, 1px); background: transparent; overflow: hidden; z-index: 1; }
@@ -57,9 +55,6 @@
   .replica-3d-pill { position: relative; border-radius: 9999px; overflow: hidden; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); border-top: 1px solid rgba(255, 255, 255, 0.3); border-left: 1px solid rgba(255, 255, 255, 0.15); }
   .replica-3d-pill::after { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(255,255,255,0.2) 0%, rgba(255,255,255,0) 40%, rgba(0,0,0,0.3) 100%); pointer-events: none; z-index: 0; }
 
-  /* =========================================================
-     EXACT REFERENCE REPLICA: INCIDENT STATUS PILLS
-     ========================================================= */
   .status-badge-ref {
     position: relative;
     display: inline-flex;

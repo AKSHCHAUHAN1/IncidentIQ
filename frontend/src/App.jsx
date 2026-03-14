@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
 import { Suspense, lazy } from 'react';
 import Navbar from './components/Navbar';
@@ -21,7 +21,8 @@ function AnimatedRoutes() {
           <Route path="/monitor"     element={<Monitor />}     />
           <Route path="/predictions" element={<Predictions />} />
           <Route path="/incidents"   element={<Incidents />}   />
-          <Route path="/approvals"   element={<Approvals />}   />
+          <Route path="/alerts"      element={<Approvals />}   />
+          <Route path="/approvals"   element={<Navigate to="/alerts" replace />} />
           <Route path="/analytics"   element={<Analytics />}   />
         </Routes>
       </Suspense>

@@ -69,7 +69,7 @@ export default function Navbar() {
               <NavItem icon={<Globe size={16}/>}       label="Monitor"     path="/monitor" />
               <NavItem icon={<GitBranch size={16}/>}   label="Predictions" path="/predictions" />
               <NavItem icon={<History size={16}/>}     label="Incidents"   path="/incidents" />
-              <NavItem icon={<ShieldAlert size={16}/>} label="Approvals"   path="/approvals" badge={pendingApprovals} isCritical />
+              <NavItem icon={<ShieldAlert size={16}/>} label="Alerts"      path="/alerts" badge={pendingApprovals} isCritical />
               <NavItem icon={<BarChart2 size={16}/>}   label="Analytics"   path="/analytics" />
             </div>
           </div>

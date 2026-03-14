@@ -1,8 +1,3 @@
--- ============================================================
--- IncidentIQ Database Schema
--- Real data pipeline: probe_readings → labeled_probe_readings
--- ============================================================
-
 -- Extensions
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -10,11 +5,6 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- Schemas
 CREATE SCHEMA IF NOT EXISTS metrics;
 CREATE SCHEMA IF NOT EXISTS ml;
-
--- ─────────────────────────────────────────────────────────────
--- CORE TABLE: probe_readings
--- Written to by website-probe Node.js service every 60 seconds
--- ─────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS metrics.probe_readings (
     id              BIGSERIAL,
@@ -68,11 +58,6 @@ CREATE INDEX IF NOT EXISTS idx_probe_url_time
 CREATE INDEX IF NOT EXISTS idx_probe_time
     ON metrics.probe_readings (probed_at DESC);
 
--- ─────────────────────────────────────────────────────────────
--- Continuous aggregate: 5-minute rollups
--- Used by the LSTM for faster sequence building
--- ─────────────────────────────────────────────────────────────
-
 CREATE MATERIALIZED VIEW IF NOT EXISTS metrics.probe_5min
 WITH (timescaledb.continuous) AS
 SELECT
@@ -95,11 +80,6 @@ SELECT add_continuous_aggregate_policy(
     schedule_interval => INTERVAL '5 minutes',
     if_not_exists => TRUE
 );
-
--- ─────────────────────────────────────────────────────────────
--- ML SCHEMA TABLES
--- Created by Python scripts but defined here for reference
--- ─────────────────────────────────────────────────────────────
 
 -- url_baselines: per-URL normal baselines (from CrUX + probe warmup)
 CREATE TABLE IF NOT EXISTS ml.url_baselines (
@@ -138,7 +118,6 @@ CREATE TABLE IF NOT EXISTS ml.status_incidents (
 );
 
 -- labeled_probe_readings: final training dataset
--- (created by label_probe_data.py — defined here for reference)
 CREATE TABLE IF NOT EXISTS ml.labeled_probe_readings (
     id                  BIGSERIAL PRIMARY KEY,
     url                 TEXT NOT NULL,
@@ -163,24 +142,3 @@ CREATE TABLE IF NOT EXISTS ml.labeled_probe_readings (
 CREATE INDEX IF NOT EXISTS idx_labeled_url  ON ml.labeled_probe_readings (url);
 CREATE INDEX IF NOT EXISTS idx_labeled_at   ON ml.labeled_probe_readings (probed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_labeled_type ON ml.labeled_probe_readings (anomaly_type);
-
--- ─────────────────────────────────────────────────────────────
--- USEFUL QUERIES FOR DEBUGGING
--- ─────────────────────────────────────────────────────────────
-
--- Check how much probe data you have
--- SELECT url, COUNT(*), MIN(probed_at), MAX(probed_at)
--- FROM metrics.probe_readings
--- GROUP BY url ORDER BY COUNT(*) DESC;
-
--- Check label distribution
--- SELECT anomaly_type, label_source, COUNT(*)
--- FROM ml.labeled_probe_readings
--- GROUP BY anomaly_type, label_source
--- ORDER BY COUNT(*) DESC;
-
--- Check status page incidents
--- SELECT service_name, anomaly_type, COUNT(*), AVG(duration_min)
--- FROM ml.status_incidents
--- GROUP BY service_name, anomaly_type
--- ORDER BY COUNT(*) DESC;
