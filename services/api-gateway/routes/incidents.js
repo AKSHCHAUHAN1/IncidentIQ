@@ -3,26 +3,33 @@ import { pool } from "../db.js";
 
 const router = Router();
 
-// GET /api/incidents
+// GET /api/incidents — list incidents for user sites only
 router.get("/", async (req, res) => {
   try {
     const { service_id, status, severity, limit = 50, offset = 0 } = req.query;
-    let conditions = [], params = [], i = 1;
+    let conditions = [
+      `i.url IN (SELECT url FROM public.monitored_sites WHERE is_training_only = FALSE AND is_active = TRUE)`
+    ];
+    let params = [];
+    let i = 1;
 
     if (service_id) { conditions.push(`i.service_id=$${i++}`); params.push(service_id); }
     if (status)     { conditions.push(`i.status=$${i++}`);     params.push(status); }
     if (severity)   { conditions.push(`i.severity=$${i++}`);   params.push(severity); }
 
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const where = `WHERE ${conditions.join(" AND ")}`;
     params.push(parseInt(limit), parseInt(offset));
 
     const result = await pool.query(
-      `SELECT i.*,
-              r.action        as remediation_action,
-              r.status        as remediation_status,
-              r.auto_executed as auto_executed
+      `SELECT i.id, i.url, i.root_cause AS anomaly_type, i.confidence,
+              i.predicted_at AS started_at, i.resolved_at, i.status, i.severity,
+              i.service_id,
+              CASE
+                WHEN i.resolved_at IS NOT NULL
+                THEN ROUND(EXTRACT(EPOCH FROM (i.resolved_at - i.predicted_at)) / 60)
+                ELSE NULL
+              END AS duration_min
        FROM incidents.incidents i
-       LEFT JOIN incidents.remediations r ON r.incident_id = i.id
        ${where}
        ORDER BY i.predicted_at DESC
        LIMIT $${i++} OFFSET $${i++}`,
@@ -34,89 +41,34 @@ router.get("/", async (req, res) => {
       params.slice(0, -2)
     );
 
-    res.json({ incidents: result.rows, total: parseInt(count.rows[0].count) });
+    res.json({ success: true, incidents: result.rows, total: parseInt(count.rows[0].count) });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[incidents GET /] error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// GET /api/incidents/:id — full detail with remediations
+// GET /api/incidents/:id — full detail
 router.get("/:id", async (req, res) => {
   try {
     const inc = await pool.query(
-      "SELECT * FROM incidents.incidents WHERE id=$1",
+      `SELECT i.id, i.url, i.root_cause AS anomaly_type, i.confidence,
+              i.predicted_at AS started_at, i.resolved_at, i.status, i.severity,
+              i.service_id, i.metrics_snapshot,
+              CASE
+                WHEN i.resolved_at IS NOT NULL
+                THEN ROUND(EXTRACT(EPOCH FROM (i.resolved_at - i.predicted_at)) / 60)
+                ELSE NULL
+              END AS duration_min
+       FROM incidents.incidents WHERE id=$1`,
       [req.params.id]
     );
-    if (!inc.rows.length) return res.status(404).json({ error: "Not found" });
+    if (!inc.rows.length) return res.status(404).json({ success: false, error: "Not found" });
 
-    const rem = await pool.query(
-      "SELECT * FROM incidents.remediations WHERE incident_id=$1",
-      [req.params.id]
-    );
-
-    res.json({ incident: inc.rows[0], remediations: rem.rows });
+    res.json({ success: true, incident: inc.rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/incidents/:id/similar — pgvector similarity search
-// Returns top 5 most similar past incidents based on metric fingerprint
-router.get("/:id/similar", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const limit  = Math.min(parseInt(req.query.limit || "5"), 10);
-
-    // First check if embeddings table exists (pgvector may not be set up)
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables
-        WHERE table_schema = 'incidents'
-        AND table_name = 'incident_embeddings'
-      ) AS exists
-    `);
-
-    if (!tableCheck.rows[0].exists) {
-      return res.status(503).json({
-        error: "pgvector not set up yet. Run schema_v3.sql first.",
-        setup_command: "docker compose exec postgres psql -U postgres -d incident_predictor -f /tmp/schema_v3.sql"
-      });
-    }
-
-    // Make sure this incident has an embedding
-    await pool.query("SELECT incidents.generate_embedding($1)", [id]);
-
-    // Find similar incidents using cosine distance
-    const result = await pool.query(`
-      SELECT
-        i.id,
-        i.service_id,
-        i.severity,
-        i.status,
-        i.predicted_at,
-        i.metrics_snapshot,
-        (1 - (e.embedding <=> target.embedding)) AS similarity
-      FROM incidents.incident_embeddings e
-      JOIN incidents.incidents i ON i.id = e.id
-      CROSS JOIN (
-        SELECT embedding FROM incidents.incident_embeddings WHERE id = $1
-      ) AS target
-      WHERE e.id != $1
-        AND i.status IN ('prevented', 'occurred')
-      ORDER BY e.embedding <=> target.embedding ASC
-      LIMIT $2
-    `, [id, limit]);
-
-    res.json({
-      incident_id: id,
-      similar:     result.rows.map(r => ({
-        ...r,
-        similarity_pct: Math.round(r.similarity * 100),
-      })),
-    });
-  } catch (err) {
-    console.error("Similar incidents error:", err.message);
-    res.status(500).json({ error: err.message });
+    console.error("[incidents GET /:id] error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

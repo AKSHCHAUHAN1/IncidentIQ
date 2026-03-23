@@ -56,7 +56,7 @@ export const api = {
   mlHealth:      ()            => call('/api/ml/health'),
 
   // Metrics
-  metricsLive:   (svc, n)      => call(`/api/metrics/live?service_id=${svc}&limit=${n || 30}`),
+  metricsLive:   (url, n)      => call(`/api/metrics/live?url=${encodeURIComponent(url)}&limit=${n || 30}`),
 
   // Predictions
   predictions:   (params)      => call('/api/predictions?' + new URLSearchParams(params)),
@@ -65,17 +65,20 @@ export const api = {
   incidents:     (params)      => call('/api/incidents?' + new URLSearchParams(params)),
   incidentById:  (id)          => call(`/api/incidents/${id}`),
 
-  // Approvals
-  approvals:     (status)      => call(`/api/approvals?status=${status || 'pending'}`),
+  // Approvals — new Action Taken / Ignore workflow
+  approvals:     ()            => call('/api/approvals'),
   approvalCount: ()            => call('/api/approvals/count'),
-  approve:       (id)          => call(`/api/approvals/${id}/approve`, { method: 'POST' }),
-  reject:        (id, reason)  => call(`/api/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  patchApproval: (id, status)  => call(`/api/approvals/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  }),
 
   // Services
   services:      ()            => call('/api/services'),
 
   // Monitored sites
   sites:         ()            => call('/api/sites'),
+  sitesStatus:   ()            => call('/api/sites/status'),
   addSite:       (url, name)   => call('/api/sites', { method: 'POST', body: JSON.stringify({ url, name }) }),
   removeSite:    (id)          => call(`/api/sites/${id}`, { method: 'DELETE' }),
   siteMetrics:   (id, limit)   => call(`/api/sites/${id}/metrics?limit=${limit || 60}`),

@@ -247,7 +247,11 @@ def train_tfidf_lr(rows: list) -> None:
 # ─────────────────────────────────────────────────────────────
 
 def build_lstm_sequences(rows: list, url: str) -> tuple:
-    """Build (X, y) sequence pairs for a single URL."""
+    """Build (X, y) sequence pairs for a single URL.
+    
+    Targets include ALL features (not just TTFB) so the trained model
+    matches the LSTMModel architecture used for inference.
+    """
     url_rows = [r for r in rows if r["url"] == url]
     url_rows.sort(key=lambda r: r["probed_at"])
 
@@ -265,15 +269,11 @@ def build_lstm_sequences(rows: list, url: str) -> tuple:
     stds[stds == 0] = 1.0
     normalized = (values - means) / stds
 
-    ttfb_raw  = values[:, 0]
-    ttfb_mean = means[0]
-    ttfb_std  = stds[0]
-
     X_seqs, y_seqs = [], []
     for i in range(SEQUENCE_LENGTH, len(normalized) - PREDICT_HORIZON):
         X_seqs.append(normalized[i - SEQUENCE_LENGTH:i])
-        # Target: next 30 min of TTFB (normalized)
-        y_seqs.append((ttfb_raw[i:i + PREDICT_HORIZON] - ttfb_mean) / ttfb_std)
+        # Target: next 30 min of ALL features (normalized), flattened
+        y_seqs.append(normalized[i:i + PREDICT_HORIZON].reshape(-1))
 
     if not X_seqs:
         return None, None
@@ -289,6 +289,11 @@ def train_lstm(rows: list) -> None:
     except ImportError:
         print("[SKIP] PyTorch not installed. Run: pip install torch")
         return
+
+    # Import the SAME model architecture used by inference
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+    from model import LSTMModel
 
     print("\n── Training LSTM ──")
 
@@ -309,7 +314,10 @@ def train_lstm(rows: list) -> None:
 
     X = np.concatenate(all_X, axis=0)
     y = np.concatenate(all_y, axis=0)
+    n_features = len(LSTM_FEATURES)
+    expected_output = PREDICT_HORIZON * n_features
     print(f"\nTotal sequences: {len(X):,} | Shape: X={X.shape}, y={y.shape}")
+    print(f"  Output size: {expected_output} ({PREDICT_HORIZON} steps × {n_features} features)")
 
     # Train / val split (80/20, time-ordered — don't shuffle time series)
     split = int(len(X) * 0.8)
@@ -327,37 +335,11 @@ def train_lstm(rows: list) -> None:
     train_dl = DataLoader(train_ds, batch_size=256, shuffle=True)
     val_dl   = DataLoader(val_ds, batch_size=256, shuffle=False)
 
-    # ── Model definition ──────────────────────────────────────
-    class LSTMPredictor(nn.Module):
-        def __init__(self, input_size, hidden_size, num_layers, output_size):
-            super().__init__()
-            self.lstm = nn.LSTM(
-                input_size=input_size,
-                hidden_size=hidden_size,
-                num_layers=num_layers,
-                batch_first=True,
-                dropout=0.2 if num_layers > 1 else 0.0
-            )
-            self.attention = nn.Linear(hidden_size, 1)
-            self.fc = nn.Linear(hidden_size, output_size)
-
-        def forward(self, x):
-            # x: (batch, seq_len, input_size)
-            lstm_out, _ = self.lstm(x)
-            # Attention over time steps
-            attn_weights = torch.softmax(self.attention(lstm_out), dim=1)
-            context = (lstm_out * attn_weights).sum(dim=1)
-            return self.fc(context)
-
+    # ── Use the SAME model as inference ───────────────────────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    model = LSTMPredictor(
-        input_size=len(LSTM_FEATURES),
-        hidden_size=128,
-        num_layers=2,
-        output_size=PREDICT_HORIZON
-    ).to(device)
+    model = LSTMModel(input_dim=n_features).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, factor=0.5)
@@ -419,10 +401,10 @@ def train_lstm(rows: list) -> None:
 
     # Save architecture config
     config = {
-        "input_size":       len(LSTM_FEATURES),
+        "input_size":       n_features,
         "hidden_size":      128,
         "num_layers":       2,
-        "output_size":      PREDICT_HORIZON,
+        "output_size":      expected_output,
         "sequence_length":  SEQUENCE_LENGTH,
         "predict_horizon":  PREDICT_HORIZON,
         "features":         LSTM_FEATURES,
@@ -445,7 +427,7 @@ def train_lstm(rows: list) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=["lstm", "if", "tfidf", "all"], default="all")
-    parser.add_argument("--min-samples", type=int, default=10000,
+    parser.add_argument("--min-samples", type=int, default=5000,
                         help="Minimum labeled rows required")
     args = parser.parse_args()
 

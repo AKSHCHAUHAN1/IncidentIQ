@@ -4,17 +4,11 @@
  * HTTP probe service — polls all target URLs every 60 seconds
  * and writes real measurements to TimescaleDB.
  *
- * Measures:
- *   - TTFB (Time To First Byte)
- *   - DNS resolution time
- *   - TCP connect time
- *   - TLS handshake time
- *   - SSL certificate expiry (days left)
- *   - Rolling 5-minute error rate
- *   - HTTP status code
+ * On startup: seeds training URLs from probe-targets.json into
+ * public.monitored_sites with is_training_only = TRUE.
  *
- * All timing uses Node.js performance hooks — real measurements,
- * not estimates.
+ * Every cycle: queries public.monitored_sites for active targets,
+ * merges into in-memory list, and probes all of them.
  */
 
 import https from "https";
@@ -28,21 +22,16 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
-// ─────────────────────────────────────────────────────────────
-// CONFIG
-// ─────────────────────────────────────────────────────────────
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGETS_FILE = join(__dirname, "probe-targets.json");
-const TARGETS = JSON.parse(readFileSync(TARGETS_FILE)).targets;
+const SEED_TARGETS = JSON.parse(readFileSync(TARGETS_FILE)).targets;
 
-const PROBE_INTERVAL_MS = 60_000;           // probe every 60 seconds
-const REQUEST_TIMEOUT_MS = 15_000;          // 15s timeout per request
-const ERROR_RATE_WINDOW_MIN = 5;            // rolling window for error rate
-const MAX_RETRIES = 1;                      // retry failed probes once
+const PROBE_INTERVAL_MS = 60_000;
+const REQUEST_TIMEOUT_MS = 15_000;
+const ERROR_RATE_WINDOW_MIN = 5;
 
 const DB_URL = process.env.DATABASE_URL ||
-  "postgresql://postgres:postgres@localhost:5432/incidentiq";
+  "postgresql://postgres:postgres@localhost:5432/incident_predictor";
 
 const pool = new pg.Pool({ connectionString: DB_URL, max: 5 });
 
@@ -51,19 +40,62 @@ const redisClient = new Redis({ host: REDIS_HOST, port: 6379, maxRetriesPerReque
 redisClient.on("connect", () => console.log("Redis connected"));
 redisClient.on("error", (err) => console.error("Redis error:", err.message));
 
-// ─────────────────────────────────────────────────────────────
-// ROLLING ERROR RATE TRACKER
-// Keeps last 5 minutes of status codes per URL in memory
-// ─────────────────────────────────────────────────────────────
+// ── In-memory targets list (refreshed from DB each cycle) ─────
+let activeTargets = [];
+const errorWindows = new Map();
 
-const errorWindows = new Map(); // url → [{ ts: Date, isError: boolean }]
+// ── Seed training URLs into public.monitored_sites ────────────
+async function seedTrainingUrls() {
+  console.log(`[SEED] Seeding ${SEED_TARGETS.length} training URLs into public.monitored_sites...`);
+  for (const target of SEED_TARGETS) {
+    try {
+      await pool.query(
+        `INSERT INTO public.monitored_sites (url, name, is_training_only, is_active)
+         VALUES ($1, $2, TRUE, TRUE)
+         ON CONFLICT (url) DO NOTHING`,
+        [target.probe_url, target.name]
+      );
+    } catch (err) {
+      console.error(`[SEED ERROR] ${target.name}: ${err.message}`);
+    }
+  }
+  console.log(`[SEED] Done seeding training URLs.`);
+}
+
+// ── Refresh targets from DB ────────────────────────────────────
+async function refreshTargetsFromDB() {
+  try {
+    const result = await pool.query(
+      `SELECT id, url, name, is_training_only
+       FROM public.monitored_sites
+       WHERE is_active = TRUE`
+    );
+    activeTargets = result.rows.map(row => ({
+      id: row.id,
+      probe_url: row.url,
+      name: row.name || new URL(row.url).hostname,
+      is_training_only: row.is_training_only,
+    }));
+    console.log(`[TARGETS] Refreshed: ${activeTargets.length} active targets (${activeTargets.filter(t => !t.is_training_only).length} user, ${activeTargets.filter(t => t.is_training_only).length} training)`);
+  } catch (err) {
+    console.error(`[TARGETS ERROR] Failed to refresh from DB: ${err.message}`);
+    // If DB fails and we have no targets, fall back to seed targets
+    if (activeTargets.length === 0) {
+      activeTargets = SEED_TARGETS.map(t => ({
+        probe_url: t.probe_url,
+        name: t.name,
+        is_training_only: true,
+      }));
+      console.log(`[TARGETS] Falling back to ${activeTargets.length} seed targets`);
+    }
+  }
+}
 
 function trackResult(url, isError) {
   if (!errorWindows.has(url)) errorWindows.set(url, []);
   const window = errorWindows.get(url);
   window.push({ ts: Date.now(), isError });
 
-  // Prune entries older than 5 minutes
   const cutoff = Date.now() - ERROR_RATE_WINDOW_MIN * 60_000;
   const pruned = window.filter((e) => e.ts >= cutoff);
   errorWindows.set(url, pruned);
@@ -71,10 +103,6 @@ function trackResult(url, isError) {
   const errors = pruned.filter((e) => e.isError).length;
   return errors / Math.max(pruned.length, 1);
 }
-
-// ─────────────────────────────────────────────────────────────
-// SSL CERTIFICATE EXPIRY CHECK
-// ─────────────────────────────────────────────────────────────
 
 async function getSslDaysLeft(hostname) {
   return new Promise((resolve) => {
@@ -102,11 +130,6 @@ async function getSslDaysLeft(hostname) {
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-// CORE PROBE FUNCTION
-// Returns real timing measurements for a single URL
-// ─────────────────────────────────────────────────────────────
-
 async function probe(targetUrl) {
   const url = new URL(targetUrl);
   const hostname = url.hostname;
@@ -129,7 +152,6 @@ async function probe(targetUrl) {
   };
 
   try {
-    // DNS timing
     const dnsStart = performance.now();
     let resolvedIp;
     try {
@@ -143,10 +165,8 @@ async function probe(targetUrl) {
       return result;
     }
 
-    // SSL days left (parallel, non-blocking on main timing)
     const sslPromise = isHttps ? getSslDaysLeft(hostname) : Promise.resolve(null);
 
-    // HTTP request timing
     await new Promise((resolve, reject) => {
       const reqStart = performance.now();
       let tcpConnectedAt = null;
@@ -205,10 +225,8 @@ async function probe(targetUrl) {
       req.end();
     });
 
-    // SSL cert expiry (wait for parallel check)
     result.ssl_days_left = await sslPromise;
 
-    // Rolling error rate
     const isError = !result.status_code || result.status_code >= 400;
     result.error_rate = trackResult(targetUrl, isError);
 
@@ -220,10 +238,6 @@ async function probe(targetUrl) {
   return result;
 }
 
-// ─────────────────────────────────────────────────────────────
-// WRITE TO TIMESCALEDB
-// ─────────────────────────────────────────────────────────────
-
 const INSERT_SQL = `
   INSERT INTO metrics.probe_readings (
     url, probed_at, ttfb_ms, dns_ms, tcp_ms, tls_ms,
@@ -231,7 +245,7 @@ const INSERT_SQL = `
   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 `;
 
-async function publishToRedis(reading) {
+async function publishToRedis(reading, isTrainingOnly) {
   try {
     const sampleTs = reading.probed_at;
     const serviceId = new URL(reading.url).hostname;
@@ -251,7 +265,8 @@ async function publishToRedis(reading) {
         "metric_name", metricName,
         "value", String(value),
         "sample_ts", sampleTs,
-        "url", reading.url
+        "url", reading.url,
+        "is_training_only", isTrainingOnly ? "1" : "0"
       );
     }
   } catch (err) {
@@ -259,7 +274,7 @@ async function publishToRedis(reading) {
   }
 }
 
-async function writeReading(reading) {
+async function writeReading(reading, isTrainingOnly) {
   try {
     await pool.query(INSERT_SQL, [
       reading.url,
@@ -274,57 +289,62 @@ async function writeReading(reading) {
       reading.response_size,
       reading.content_type,
     ]);
-    // Publish to Redis stream for the inference pipeline
-    await publishToRedis(reading);
+    await publishToRedis(reading, isTrainingOnly);
   } catch (err) {
     console.error(`[DB ERROR] ${reading.url}: ${err.message}`);
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// PROBE LOOP
-// ─────────────────────────────────────────────────────────────
-
 async function probeAll() {
+  // Refresh targets from DB before each probe cycle
+  await refreshTargetsFromDB();
+
+  if (activeTargets.length === 0) {
+    console.log(`[${new Date().toISOString()}] No targets to probe.`);
+    return;
+  }
+
   const start = Date.now();
-  console.log(`[${new Date().toISOString()}] Probing ${TARGETS.length} URLs...`);
+  console.log(`[${new Date().toISOString()}] Probing ${activeTargets.length} URLs...`);
 
   const results = await Promise.allSettled(
-    TARGETS.map(async (target) => {
+    activeTargets.map(async (target) => {
       const reading = await probe(target.probe_url);
 
-      // Log summary
       const status = reading.error
         ? `ERROR: ${reading.error}`
         : `${reading.status_code} | TTFB: ${reading.ttfb_ms}ms | DNS: ${reading.dns_ms}ms | SSL: ${reading.ssl_days_left?.toFixed(0)}d`;
-      console.log(`  ${target.name.padEnd(15)} ${status}`);
+      const flag = target.is_training_only ? '[TRAIN]' : '[USER]';
+      console.log(`  ${flag} ${target.name.padEnd(15)} ${status}`);
 
-      await writeReading(reading);
+      await writeReading(reading, target.is_training_only);
       return reading;
     })
   );
 
   const elapsed = Date.now() - start;
   const ok = results.filter((r) => r.status === "fulfilled" && !r.value.error).length;
-  const errors = TARGETS.length - ok;
+  const errors = activeTargets.length - ok;
 
   console.log(`  Done in ${elapsed}ms | OK: ${ok} | Errors: ${errors}\n`);
 }
 
-// ─────────────────────────────────────────────────────────────
-// MAIN
-// ─────────────────────────────────────────────────────────────
+// ── Bootstrap ─────────────────────────────────────────────────
+async function bootstrap() {
+  console.log("IncidentIQ Website Probe starting...");
 
-console.log("IncidentIQ Website Probe starting...");
-console.log(`Targets: ${TARGETS.length} URLs | Interval: ${PROBE_INTERVAL_MS / 1000}s`);
+  // Seed training URLs on startup
+  await seedTrainingUrls();
 
-// First probe immediately on startup
-probeAll().catch(console.error);
+  // Initial target refresh + first probe
+  await probeAll();
 
-// Then probe every 60 seconds
-setInterval(() => probeAll().catch(console.error), PROBE_INTERVAL_MS);
+  // Schedule probes every 60 seconds
+  setInterval(() => probeAll().catch(console.error), PROBE_INTERVAL_MS);
+}
 
-// Graceful shutdown
+bootstrap().catch(console.error);
+
 process.on("SIGTERM", async () => {
   console.log("Shutting down...");
   await pool.end();

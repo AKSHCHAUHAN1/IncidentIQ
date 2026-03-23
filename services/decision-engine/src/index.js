@@ -21,13 +21,32 @@ const pool = new Pool({
 // ── Notify API Gateway (fires WebSocket event to frontend) ────
 async function notify(type, data) {
   try {
+    console.log(`[Decision] Notifying gateway: type=${type}, url=${data?.url || data?.service_id}`);
     await fetch(`${API_GATEWAY_URL}/internal/event`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type, data }),
     });
   } catch (err) {
-    console.warn("Gateway notify failed:", err.message);
+    console.warn("[Decision] Gateway notify failed:", err.message);
+  }
+}
+
+// ── Check if URL is training-only ────────────────────────────
+async function isTrainingOnly(url) {
+  if (!url) return false;
+  try {
+    const result = await pool.query(
+      `SELECT is_training_only FROM public.monitored_sites WHERE url = $1`,
+      [url]
+    );
+    if (result.rows.length > 0) {
+      return result.rows[0].is_training_only === true;
+    }
+    return false;
+  } catch (err) {
+    console.warn("[Decision] is_training_only check failed:", err.message);
+    return false;
   }
 }
 
@@ -89,129 +108,144 @@ function deriveSeverity(prediction, currentMetrics, confidence) {
   return "normal";
 }
 
-async function savePrediction(serviceId, severity, confidence, predictionData) {
+function buildRootCauseMessage(url, rootCause, currentMetrics, breachEtaMin) {
+  const explanations = {
+    ssl_expiry_warning: `SSL certificate for ${url} expires in ${Math.round(currentMetrics?.ssl_days_left || 0)} days`,
+    error_spike: `Error rate spiked to ${(currentMetrics?.error_rate || 0).toFixed(1)}% with status ${currentMetrics?.status_code || 'unknown'}`,
+    dns_degradation: `DNS resolution degraded to ${Math.round(currentMetrics?.dns_ms || 0)}ms`,
+    origin_slowdown: `Origin server slowdown — TTFB ${Math.round(currentMetrics?.ttfb_ms || 0)}ms`,
+    latency_spike: `Latency spike — TTFB ${Math.round(currentMetrics?.ttfb_ms || 0)}ms`,
+    normal: `All metrics within normal bounds`,
+  };
+  const explanation = explanations[rootCause] || rootCause;
+  const etaPart = breachEtaMin ? ` Estimated SLA breach in ${breachEtaMin} minutes.` : "";
+  return `${rootCause.replace(/_/g, " ")} detected on ${url}. ${explanation}.${etaPart}`;
+}
+
+async function savePrediction(serviceId, url, severity, confidence, predictionData) {
   const id = randomUUID();
   await pool.query(
-    `INSERT INTO ml.predictions (id, service_id, model_name, severity, confidence, prediction_data, outcome)
-     VALUES ($1,$2,'sla-ensemble',$3,$4,$5,'pending')`,
-    [id, serviceId, severity, confidence, JSON.stringify(predictionData)]
+    `INSERT INTO ml.predictions (id, service_id, url, model_name, severity, confidence, prediction_data, outcome, status)
+     VALUES ($1,$2,$3,'sla-ensemble',$4,$5,$6,'pending','open')`,
+    [id, serviceId, url, severity, confidence, JSON.stringify(predictionData)]
   );
+  console.log(`[Decision] Saved prediction ${id} for ${url} (severity=${severity}, confidence=${(confidence * 100).toFixed(1)}%)`);
   return id;
 }
 
-async function saveIncident(serviceId, severity, confidence, predictionId, metricsSnapshot, rootCause) {
+async function saveIncident(serviceId, url, severity, confidence, predictionId, metricsSnapshot, rootCause) {
   const id = `INC-${Date.now()}`;
   await pool.query(
     `INSERT INTO incidents.incidents (
-       id, service_id, severity, confidence, prediction_id, root_cause, metrics_snapshot
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [id, serviceId, severity, confidence, predictionId, rootCause, JSON.stringify(metricsSnapshot)]
+       id, service_id, url, severity, confidence, prediction_id, root_cause, metrics_snapshot, status
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'open')`,
+    [id, serviceId, url, severity, confidence, predictionId, rootCause, JSON.stringify(metricsSnapshot)]
   );
+  console.log(`[Decision] Saved incident ${id} for ${url}`);
   return id;
-}
-
-async function saveRemediation(incidentId, serviceId, action, confidence, autoExecuted) {
-  const id = randomUUID();
-  await pool.query(
-    `INSERT INTO incidents.remediations (id, incident_id, service_id, action, confidence, auto_executed, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [id, incidentId, serviceId, action, confidence, autoExecuted, autoExecuted ? "executing" : "pending"]
-  );
-  return id;
-}
-
-function buildIncidentReport(serviceId, prediction, currentMetrics, rootCause) {
-  return {
-    service_id: serviceId,
-    generated_at: new Date().toISOString(),
-    root_cause: rootCause,
-    breach_eta_min: prediction?.breach_eta_min ?? null,
-    sla_threshold_ms: prediction?.sla_threshold_ms ?? SLA_TTFB_MS,
-    forecast_ttfb_ms: prediction?.ttfb_forecast_ms ?? [],
-    current_metrics: currentMetrics,
-    probable_actions: [
-      "Notify on-call via webhook/email",
-      "Escalate if breach ETA <= 10 minutes",
-      "Track DNS, origin latency, and error-rate deltas",
-    ],
-  };
 }
 
 app.post("/evaluate", async (req, res) => {
   try {
-    const { service_id, prediction = {}, current_metrics = {} } = req.body;
+    const { service_id, prediction = {}, current_metrics = {}, url } = req.body;
 
     if (!service_id) {
       return res.status(400).json({ error: "service_id is required" });
     }
 
+    // Resolve URL — from request body or derive from service_id
+    const resolvedUrl = url || current_metrics?.url || null;
+
+    // ── CHECK: is this URL training-only? ──
+    if (resolvedUrl) {
+      const training = await isTrainingOnly(resolvedUrl);
+      if (training) {
+        console.log(`[Decision] SKIP (training-only): ${resolvedUrl}`);
+        return res.json({ status: "skipped_training", service_id, url: resolvedUrl });
+      }
+    }
+
     const confidence = computeConfidence(prediction, current_metrics);
     const severity = deriveSeverity(prediction, current_metrics, confidence);
     const rootCause = deriveRootCause(current_metrics, prediction);
-    const report = buildIncidentReport(service_id, prediction, current_metrics, rootCause);
+    const message = buildRootCauseMessage(resolvedUrl || service_id, rootCause, current_metrics, prediction?.breach_eta_min);
 
-    console.log(`[Decision] ${service_id} | severity=${severity} | confidence=${(confidence * 100).toFixed(1)}%`);
+    console.log(`[Decision] ${service_id} | url=${resolvedUrl} | severity=${severity} | confidence=${(confidence * 100).toFixed(1)}% | root_cause=${rootCause}`);
 
-    const predictionId = await savePrediction(service_id, severity, confidence, {
-      ...prediction,
-      root_cause: rootCause,
-    });
-
-    if (severity === "normal") {
-      return res.json({ status: "normal", confidence, severity, root_cause: rootCause, prediction_id: predictionId });
+    // ── confidence < 0.70 → log only, no DB insert ──
+    if (confidence < 0.70) {
+      console.log(`[Decision] LOW CONFIDENCE (${(confidence * 100).toFixed(1)}%) — log only`);
+      return res.json({ status: "normal", confidence, severity, root_cause: rootCause, url: resolvedUrl });
     }
 
-    const action = "dispatch_alert_report";
-    const incidentId = await saveIncident(service_id, severity, confidence, predictionId, current_metrics, rootCause);
-
-    // Notify frontend of new prediction
-    notify("prediction", {
-      service_id,
-      severity,
-      confidence,
-      incident_id: incidentId,
+    // Save prediction for all user-site results with confidence >= 0.70
+    const predictionId = await savePrediction(service_id, resolvedUrl, severity, confidence, {
+      ...prediction,
       root_cause: rootCause,
-      breach_eta_min: prediction?.breach_eta_min ?? null,
+      message,
     });
 
-    if (severity === "critical" || confidence >= 0.85) {
-      const remediationId = await saveRemediation(incidentId, service_id, action, confidence, true);
-      console.log(`[Decision] ALERT DISPATCHED: ${service_id} | root_cause=${rootCause}`);
-      notify("remediation_done", { service_id, action, remediationId, root_cause: rootCause, report });
+    // ── confidence >= 0.90 → incident + new_alert ──
+    if (confidence >= 0.90) {
+      const incidentId = await saveIncident(service_id, resolvedUrl, severity, confidence, predictionId, current_metrics, rootCause);
+      console.log(`[Decision] ALERT FIRED: ${service_id} | root_cause=${rootCause} | confidence=${(confidence * 100).toFixed(1)}%`);
+
+      notify("new_alert", {
+        url: resolvedUrl,
+        anomaly_type: rootCause,
+        confidence,
+        ttfb_ms: current_metrics?.ttfb_ms ?? 0,
+        message,
+        incident_id: incidentId,
+        service_id,
+      });
+
+      // Also emit as new_prediction
+      notify("new_prediction", {
+        url: resolvedUrl,
+        anomaly_type: rootCause,
+        confidence,
+        predicted_at: new Date().toISOString(),
+        service_id,
+        severity,
+        prediction_id: predictionId,
+      });
+
       return res.json({
-        status: "alert_dispatched",
+        status: "alert_fired",
         confidence,
         severity,
-        action,
         incident_id: incidentId,
+        prediction_id: predictionId,
         root_cause: rootCause,
+        url: resolvedUrl,
       });
     }
 
-    const remediationId = await saveRemediation(incidentId, service_id, action, confidence, false);
-    console.log(`[Decision] APPROVAL NEEDED: ${service_id} | root_cause=${rootCause}`);
-    notify("approval_needed", {
-      service_id,
-      action,
+    // ── confidence 0.70–0.89 → new_prediction (approval queue) ──
+    console.log(`[Decision] PREDICTION (approval queue): ${service_id} | confidence=${(confidence * 100).toFixed(1)}%`);
+
+    notify("new_prediction", {
+      url: resolvedUrl,
+      anomaly_type: rootCause,
       confidence,
-      remediationId,
-      incidentId,
-      root_cause: rootCause,
-      breach_eta_min: prediction?.breach_eta_min ?? null,
+      predicted_at: new Date().toISOString(),
+      service_id,
+      severity,
+      prediction_id: predictionId,
     });
 
     return res.json({
       status: "pending_approval",
       confidence,
       severity,
-      action,
-      incident_id: incidentId,
-      remediation_id: remediationId,
+      prediction_id: predictionId,
       root_cause: rootCause,
+      url: resolvedUrl,
     });
 
   } catch (err) {
-    console.error("Decision error:", err.message);
+    console.error("[Decision] Error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });

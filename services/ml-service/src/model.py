@@ -1,6 +1,16 @@
+import os
+import sys
 import torch
 import torch.nn as nn
-from config import HIDDEN_SIZE, NUM_LAYERS, OUTPUT_WINDOW
+
+# Ensure config is importable from both src/ and training/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from config import HIDDEN_SIZE, NUM_LAYERS, OUTPUT_WINDOW
+except ImportError:
+    HIDDEN_SIZE = 128
+    NUM_LAYERS = 2
+    OUTPUT_WINDOW = 30
 
 class Attention(nn.Module):
     def __init__(self, hidden_dim):

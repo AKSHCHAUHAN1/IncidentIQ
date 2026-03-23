@@ -40,7 +40,7 @@ function PredictionCard({ prediction }) {
         <div className="flex items-center gap-3 min-w-0">
           {cfg.icon}
           <div className="min-w-0">
-            <p className="font-semibold text-white text-sm truncate">{prediction.service_id}</p>
+            <p className="font-semibold text-white text-sm truncate">{prediction.url || prediction.service_id}</p>
             <p className="text-xs text-gray-500 font-mono">
               {new Date(prediction.created_at).toLocaleString()}
             </p>
@@ -87,9 +87,9 @@ function PredictionCard({ prediction }) {
                 <p className="text-white font-bold">{prediction.model_name || 'ensemble'}</p>
               </div>
               <div className="replica-3d-item p-3">
-                <span className="text-gray-500">Outcome</span>
-                <p className={`font-bold ${prediction.outcome === 'true_positive' || prediction.outcome === 'prevented' ? 'text-green-400' : prediction.outcome === 'false_positive' ? 'text-red-400' : 'text-gray-400'}`}>
-                  {prediction.outcome || 'pending'}
+                <span className="text-gray-500">Status</span>
+                <p className={`font-bold ${prediction.status === 'action_taken' ? 'text-green-400' : prediction.status === 'ignored' ? 'text-gray-400' : 'text-amber-400'}`}>
+                  {(prediction.status || 'open').replace(/_/g, ' ')}
                 </p>
               </div>
                 <div className="replica-3d-item p-3 col-span-2">
@@ -124,8 +124,10 @@ export default function Predictions() {
 
   useEffect(() => {
     fetchPredictions();
-    socket.on('prediction', () => fetchPredictions());
-    return () => socket.off('prediction');
+
+    const handler = () => fetchPredictions();
+    socket.on('new_prediction', handler);
+    return () => socket.off('new_prediction', handler);
   }, [filter]);
 
   const counts = {

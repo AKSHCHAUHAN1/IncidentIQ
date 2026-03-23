@@ -17,13 +17,15 @@ from model import LSTMModel
 
 app = FastAPI(title="IncidentIQ ML Service")
 
-MODEL_DIR = "/app/models"
+MODEL_DIR = os.getenv("MODEL_DIR", "/app/models")
+os.makedirs(MODEL_DIR, exist_ok=True)
 SLA_TTFB_MS = float(os.getenv("SLA_TTFB_MS", "2000"))
 
 lstm_model = None
 scaler = None
 baseline = None
 iso_model = None
+if_scaler = None
 log_classifier = None
 
 ANOMALY_LABELS = {
@@ -38,20 +40,28 @@ ANOMALY_LABELS = {
 
 
 def load_models():
-    global lstm_model, scaler, baseline, iso_model, log_classifier
+    global lstm_model, scaler, baseline, iso_model, if_scaler, log_classifier
 
     lstm_model = None
     scaler = None
     baseline = None
     iso_model = None
+    if_scaler = None
     log_classifier = None
 
-    lstm_path = os.path.join(MODEL_DIR, "model.pt")
-    if os.path.exists(lstm_path):
-        lstm_model = LSTMModel(len(FEATURES))
-        lstm_model.load_state_dict(torch.load(lstm_path, map_location="cpu"))
-        lstm_model.eval()
-        print("✓ LSTM loaded")
+    # LSTM — train_models.py saves as lstm_best.pt, legacy trainer saves as model.pt
+    for lstm_name in ["lstm_best.pt", "model.pt"]:
+        lstm_path = os.path.join(MODEL_DIR, lstm_name)
+        if os.path.exists(lstm_path):
+            try:
+                lstm_model = LSTMModel(len(FEATURES))
+                lstm_model.load_state_dict(torch.load(lstm_path, map_location="cpu", weights_only=True))
+                lstm_model.eval()
+                print(f"✓ LSTM loaded from {lstm_name}")
+            except Exception as e:
+                print(f"✗ LSTM load error ({lstm_name}): {e}")
+                lstm_model = None
+            break
     else:
         print("✗ LSTM not found — train first")
 
@@ -71,14 +81,19 @@ def load_models():
     else:
         print("✗ Isolation Forest not found — train first")
 
-    pattern_path = os.path.join(MODEL_DIR, "pattern_classifier.pkl")
-    legacy_log_path = os.path.join(MODEL_DIR, "log_classifier.pkl")
-    if os.path.exists(pattern_path):
-        log_classifier = joblib.load(pattern_path)
-        print("✓ Pattern classifier loaded")
-    elif os.path.exists(legacy_log_path):
-        log_classifier = joblib.load(legacy_log_path)
-        print("✓ Legacy log classifier loaded")
+    # IF scaler (saved alongside isolation forest by train_models.py)
+    if_scaler_path = os.path.join(MODEL_DIR, "if_scaler.pkl")
+    if os.path.exists(if_scaler_path):
+        if_scaler = joblib.load(if_scaler_path)
+        print("✓ IF Scaler loaded")
+
+    # TF-IDF + LR pipeline — train_models.py saves as tfidf_lr_pipeline.pkl
+    for clf_name in ["tfidf_lr_pipeline.pkl", "pattern_classifier.pkl", "log_classifier.pkl"]:
+        clf_path = os.path.join(MODEL_DIR, clf_name)
+        if os.path.exists(clf_path):
+            log_classifier = joblib.load(clf_path)
+            print(f"✓ Pattern classifier loaded from {clf_name}")
+            break
     else:
         print("✗ Pattern classifier not found — train first")
 
@@ -221,8 +236,11 @@ def detect_anomaly(request: AnomalyRequest):
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
 
-    flags = iso_model.predict(arr)
-    scores = iso_model.decision_function(arr)
+    # Apply IF scaler if available
+    eval_arr = if_scaler.transform(arr) if if_scaler is not None else arr
+
+    flags = iso_model.predict(eval_arr)
+    scores = iso_model.decision_function(eval_arr)
 
     return {
         "anomaly_flags": flags.tolist(),
@@ -249,6 +267,43 @@ def classify_log(req: LogRequest):
 @app.post("/ensemble")
 def ensemble_predict(req: EnsembleRequest):
     arr = np.array(req.metrics_window, dtype=np.float32)
+
+    # Graceful fallback when LSTM is not loaded (first boot, before training)
+    if lstm_model is None:
+        current = arr[-1] if len(arr) > 0 else np.zeros(len(FEATURES))
+        idx = {f: i for i, f in enumerate(FEATURES)}
+        current_ttfb = float(current[idx["ttfb_ms"]])
+        current_dns = float(current[idx["dns_ms"]])
+        current_error = float(current[idx["error_rate"]])
+        current_ssl = float(current[idx["ssl_days_left"]])
+        root_cause = _root_cause_rule(current_ttfb, current_dns, current_error, current_ssl)
+        return {
+            "severity": "normal",
+            "confidence": 0.15,
+            "root_cause": root_cause,
+            "breach_eta_min": None,
+            "sla_threshold_ms": SLA_TTFB_MS,
+            "ttfb_forecast_ms": [],
+            "prediction": [],
+            "lstm_prediction": [],
+            "iso_flag": 1,
+            "pattern_label": "normal",
+            "pattern_probabilities": {},
+            "current_metrics": {
+                "ttfb_ms": current_ttfb,
+                "dns_ms": current_dns,
+                "error_rate": current_error,
+                "ssl_days_left": current_ssl,
+            },
+            "forecast_worst": {
+                "ttfb_ms": current_ttfb,
+                "dns_ms": current_dns,
+                "error_rate": current_error,
+                "ssl_days_left": current_ssl,
+            },
+            "_note": "Models not trained yet — returning low-confidence default",
+        }
+
     _validate_shape(arr)
     raw_pred = _run_lstm(arr)
 
@@ -274,6 +329,8 @@ def ensemble_predict(req: EnsembleRequest):
     if iso_model is not None:
         try:
             eval_row = np.array([[current_ttfb, current_dns, current_error, current_ssl]], dtype=np.float32)
+            if if_scaler is not None:
+                eval_row = if_scaler.transform(eval_row)
             iso_flag = int(iso_model.predict(eval_row)[0])
         except Exception:
             iso_flag = 1
@@ -374,7 +431,7 @@ def train_models():
     try:
         result = subprocess.run(
             [sys.executable, train_script],
-            capture_output=True, text=True, timeout=600
+            capture_output=True, text=True, timeout=3600
         )
         load_models()  # reload after training
         return {
@@ -384,7 +441,7 @@ def train_models():
             "stderr": result.stderr[-2000:] if result.stderr else "",
         }
     except subprocess.TimeoutExpired:
-        raise HTTPException(504, "Training timed out after 10 minutes")
+        raise HTTPException(504, "Training timed out after 60 minutes")
     except Exception as e:
         raise HTTPException(500, f"Training error: {str(e)}")
 
@@ -423,4 +480,10 @@ def model_info():
 @app.post("/reload")
 def reload_models():
     load_models()
-    return {"status": "reloaded"}
+    return {
+        "status": "reloaded",
+        "lstm_loaded": lstm_model is not None,
+        "iso_loaded": iso_model is not None,
+        "log_loaded": log_classifier is not None,
+        "baseline_loaded": baseline is not None,
+    }

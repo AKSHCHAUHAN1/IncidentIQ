@@ -22,6 +22,7 @@ function getState(serviceId) {
       window: [],
       lastSnapshot: {},
       url: null,
+      isTrainingOnly: false,
     });
   }
   return serviceBuffers.get(serviceId);
@@ -130,6 +131,7 @@ export async function startWorker() {
         }
 
         if (metric.url) state.url = metric.url;
+        if (obj.is_training_only !== undefined) state.isTrainingOnly = obj.is_training_only === "1";
         state.currentSample[metric.metric_name] = metric.value;
 
         const isReady = REQUIRED_METRICS.every((k) => state.currentSample[k] !== undefined);
@@ -148,7 +150,7 @@ export async function startWorker() {
 
           if (state.window.length === INPUT_WINDOW) {
             const metricText = buildMetricText(state.lastSnapshot);
-            await triggerPrediction(metric.service_id, state.window, state.lastSnapshot, metricText);
+            await triggerPrediction(metric.service_id, state.window, state.lastSnapshot, metricText, state.url, state.isTrainingOnly);
           }
 
           state.lastDispatchedSampleTs = metric.sample_ts;
@@ -162,8 +164,15 @@ export async function startWorker() {
   }
 }
 
-async function triggerPrediction(serviceId, window, snapshot, metricText) {
+async function triggerPrediction(serviceId, window, snapshot, metricText, url, isTrainingOnly) {
+  // Skip ML call entirely for training-only URLs — they only feed raw data
+  if (isTrainingOnly) {
+    console.log(`[Worker] SKIP prediction for training-only URL: ${url || serviceId}`);
+    return;
+  }
+
   try {
+    console.log(`[Worker] Triggering ML prediction for ${serviceId} (url=${url})`);
     const res = await fetch(ML_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -174,18 +183,20 @@ async function triggerPrediction(serviceId, window, snapshot, metricText) {
     });
 
     if (!res.ok) {
-      console.error("ML prediction failed:", await res.text());
+      console.error("[Worker] ML prediction failed:", await res.text());
       return;
     }
 
     const result = await res.json();
-    console.log("Prediction for", serviceId, {
+    console.log(`[Worker] ML response for ${serviceId}:`, JSON.stringify(result).substring(0, 200));
+    console.log(`[Worker] Prediction result for ${serviceId}:`, {
       severity: result.severity,
       confidence: result.confidence,
       root_cause: result.root_cause,
       breach_eta_min: result.breach_eta_min,
     });
 
+    console.log(`[Worker] Sending to decision-engine for ${serviceId} (url=${url})`);
     await fetch(DECISION_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -193,11 +204,13 @@ async function triggerPrediction(serviceId, window, snapshot, metricText) {
         service_id:      serviceId,
         prediction:      result,
         current_metrics: snapshot,
-        metric_text: metricText,
+        metric_text:     metricText,
+        url:             url,
       }),
     });
+    console.log(`[Worker] Decision-engine call complete for ${serviceId}`);
   } catch (err) {
-    console.error("Prediction error:", err?.message || String(err));
+    console.error("[Worker] Prediction error:", err?.message || String(err));
   }
 }
 

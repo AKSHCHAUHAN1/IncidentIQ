@@ -48,3 +48,9 @@ CREATE INDEX IF NOT EXISTS idx_incidents_service     ON incidents.incidents(serv
 CREATE INDEX IF NOT EXISTS idx_incidents_status      ON incidents.incidents(status);
 CREATE INDEX IF NOT EXISTS idx_remediations_status   ON incidents.remediations(status);
 CREATE INDEX IF NOT EXISTS idx_remediations_incident ON incidents.remediations(incident_id);
+
+-- ── Backfill ml.predictions with columns added in init.sql ────
+ALTER TABLE ml.predictions ADD COLUMN IF NOT EXISTS url TEXT;
+ALTER TABLE ml.predictions ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'open';
+ALTER TABLE ml.predictions ADD COLUMN IF NOT EXISTS actioned_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_predictions_url ON ml.predictions (url);

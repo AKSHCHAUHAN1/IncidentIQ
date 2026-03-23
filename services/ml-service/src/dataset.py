@@ -1,23 +1,39 @@
 """
-dataset.py — Z-score normalized sequences for LSTM training.
+dataset.py — Loads data from ml.labeled_probe_readings for training.
 
-WHY Z-SCORES:
-  Raw values (cpu=40%, cpu=80%) mean different things per service.
-  Z-scores measure "how many std deviations from THIS service's normal"
-  so one model generalizes to all services without retraining.
+Provides:
+  - load_data() for LSTM training (per-URL time-ordered data)
+  - compute_service_baseline() for z-score normalization
+  - create_sequences() for sliding window sequence generation
+  - load_flat_training_data() for Isolation Forest
 """
 
+import os
 import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine
-from config import (
-    DB_HOST, DB_PORT, DB_NAME,
-    DB_USER, DB_PASSWORD,
-    FEATURES, INPUT_WINDOW, OUTPUT_WINDOW
-)
+
+# Import from config — works when called from src/ or training/
+try:
+    from config import (
+        DB_HOST, DB_PORT, DB_NAME,
+        DB_USER, DB_PASSWORD,
+        FEATURES, INPUT_WINDOW, OUTPUT_WINDOW
+    )
+except ImportError:
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+    from config import (
+        DB_HOST, DB_PORT, DB_NAME,
+        DB_USER, DB_PASSWORD,
+        FEATURES, INPUT_WINDOW, OUTPUT_WINDOW
+    )
 
 
 def get_engine():
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url:
+        return create_engine(db_url)
     return create_engine(
         f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
@@ -25,41 +41,41 @@ def get_engine():
 
 def load_data():
     """
-    Load raw metric data from TimescaleDB.
+    Load labeled probe data from ml.labeled_probe_readings.
+    Groups by URL to maintain per-URL time ordering.
     Returns a numpy array of shape (T, num_features).
     """
     engine = get_engine()
 
-    query = """
+    query = f"""
     SELECT
-        time_bucket('10 seconds', time) AS bucket,
-        metric_name,
-        AVG(value) AS value
-    FROM metrics.raw_metrics
-    GROUP BY bucket, metric_name
-    ORDER BY bucket;
+        url,
+        probed_at,
+        {', '.join(FEATURES)}
+    FROM ml.labeled_probe_readings
+    WHERE ttfb_ms IS NOT NULL
+      AND dns_ms IS NOT NULL
+    ORDER BY url, probed_at
     """
 
     df = pd.read_sql(query, engine)
 
     if df.empty:
-        raise ValueError("No data in TimescaleDB. Let the generator run for 2+ minutes.")
-
-    pivot = df.pivot(index="bucket", columns="metric_name", values="value")
-
-    missing = [f for f in FEATURES if f not in pivot.columns]
-    if missing:
-        raise ValueError(f"Missing metrics: {missing}. Is the generator running?")
-
-    pivot = pivot[FEATURES].ffill().dropna()
-
-    if len(pivot) < INPUT_WINDOW + OUTPUT_WINDOW:
         raise ValueError(
-            f"Need {INPUT_WINDOW + OUTPUT_WINDOW} rows, have {len(pivot)}. "
-            "Wait 2-3 more minutes."
+            "No labeled data in ml.labeled_probe_readings. "
+            "Run the website-probe for 7+ days, then run label_probe_data.py."
         )
 
-    return pivot.values  # raw values (T, 5)
+    # Fill missing values and extract features
+    feature_df = df[FEATURES].ffill().fillna(0)
+
+    if len(feature_df) < INPUT_WINDOW + OUTPUT_WINDOW:
+        raise ValueError(
+            f"Need {INPUT_WINDOW + OUTPUT_WINDOW} rows, have {len(feature_df)}. "
+            "Run the probe service longer, then re-label."
+        )
+
+    return feature_df.values  # (T, num_features)
 
 
 def compute_service_baseline(data):
@@ -89,7 +105,7 @@ def create_sequences(data):
     """
     Create (X, y) sliding window sequences from normalized data.
     X: (N, INPUT_WINDOW, num_features)
-    y: (N, OUTPUT_WINDOW, num_features) — flattened to (N, OUTPUT_WINDOW * num_features)
+    y: (N, OUTPUT_WINDOW, num_features)
     """
     X, y = [], []
     total = INPUT_WINDOW + OUTPUT_WINDOW

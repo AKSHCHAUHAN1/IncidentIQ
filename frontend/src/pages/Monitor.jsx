@@ -5,17 +5,6 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'rec
 import { api } from '../lib/api';
 import { socket } from '../socket';
 
-const BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
-
-async function apiFetch(path, opts = {}) {
-  const token = localStorage.getItem('iq_token') || '';
-  const res = await fetch(`${BASE}${path}`, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...opts.headers },
-  });
-  return res.json();
-}
-
 // Status pill
 const StatusBadge = ({ status }) => {
   const cfg = {
@@ -37,7 +26,7 @@ const SiteSparkline = ({ siteId }) => {
   const [data, setData] = useState([]);
 
   useEffect(() => {
-    apiFetch(`/api/sites/${siteId}/metrics?limit=20`)
+    api.siteMetrics(siteId, 20)
       .then(d => {
         if (d.metrics?.length) {
           setData(d.metrics.map(m => ({
@@ -89,7 +78,7 @@ const SiteCard = ({ site, onRemove }) => {
           <StatusBadge status={site.last_status} />
           {site.last_response_ms && (
             <span className={`text-xs font-mono ${site.last_response_ms > 2000 ? 'text-red-400' : site.last_response_ms > 800 ? 'text-amber-400' : 'text-green-400'}`}>
-              {site.last_response_ms}ms
+              {Math.round(site.last_response_ms)}ms
             </span>
           )}
           <button onClick={e => { e.stopPropagation(); onRemove(site.id); }}
@@ -103,16 +92,12 @@ const SiteCard = ({ site, onRemove }) => {
         {expanded && (
           <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
             className="mt-4 pt-4 border-t border-white/5 overflow-hidden">
-            <div className="grid grid-cols-3 gap-4 mb-4 font-mono text-xs">
+            <div className="grid grid-cols-2 gap-4 mb-4 font-mono text-xs">
               <div>
-                <span className="text-gray-500">Incidents</span>
-                <p className={`font-bold text-base ${parseInt(site.critical_incidents) > 0 ? 'text-red-400' : 'text-white'}`}>
-                  {site.total_incidents || 0}
+                <span className="text-gray-500">Status</span>
+                <p className="font-bold text-base text-white">
+                  {(site.last_status || 'unknown').toUpperCase()}
                 </p>
-              </div>
-              <div>
-                <span className="text-gray-500">Critical</span>
-                <p className="font-bold text-base text-red-400">{site.critical_incidents || 0}</p>
               </div>
               <div>
                 <span className="text-gray-500">Last probed</span>
@@ -138,20 +123,49 @@ export default function Monitor() {
   const [adding, setAdding]     = useState(false);
   const [error, setError]       = useState('');
   const intervalRef             = useRef(null);
+  const statusRef               = useRef(null);
 
   async function fetchSites() {
     try {
-      const d = await apiFetch('/api/sites');
+      const d = await api.sites();
       setSites(d.sites || []);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   }
 
+  // Poll status for live updates between probe cycles
+  async function pollStatus() {
+    try {
+      const d = await api.sitesStatus();
+      if (d.sites?.length) {
+        setSites(prev => {
+          const statusMap = new Map(d.sites.map(s => [s.id, s]));
+          return prev.map(site => {
+            const fresh = statusMap.get(site.id);
+            if (fresh) {
+              return {
+                ...site,
+                last_status: fresh.status || site.last_status,
+                last_response_ms: fresh.ttfb_ms || site.last_response_ms,
+                last_probed: fresh.last_probed || site.last_probed,
+              };
+            }
+            return site;
+          });
+        });
+      }
+    } catch (err) { console.error('[Monitor] status poll error:', err); }
+  }
+
   useEffect(() => {
     fetchSites();
-    intervalRef.current = setInterval(fetchSites, 60_000); // auto-refresh every probe cycle
-    socket.on('probe_update', fetchSites);
-    return () => { clearInterval(intervalRef.current); socket.off('probe_update'); };
+    intervalRef.current = setInterval(fetchSites, 60_000); // full refresh every probe cycle
+    statusRef.current = setInterval(pollStatus, 30_000);    // status poll every 30s
+
+    return () => {
+      clearInterval(intervalRef.current);
+      clearInterval(statusRef.current);
+    };
   }, []);
 
   async function handleAdd(e) {
@@ -160,10 +174,7 @@ export default function Monitor() {
     setAdding(true);
     setError('');
     try {
-      const d = await apiFetch('/api/sites', {
-        method: 'POST',
-        body: JSON.stringify({ url: url.trim(), name: name.trim() || undefined }),
-      });
+      const d = await api.addSite(url.trim(), name.trim() || undefined);
       if (d.error) { setError(d.error); return; }
       setUrl(''); setName('');
       await fetchSites();
@@ -175,7 +186,7 @@ export default function Monitor() {
   }
 
   async function handleRemove(id) {
-    await apiFetch(`/api/sites/${id}`, { method: 'DELETE' });
+    await api.removeSite(id);
     await fetchSites();
   }
 
@@ -249,7 +260,7 @@ export default function Monitor() {
         <div className="tech-border bg-black/40 rounded-2xl p-16 flex flex-col items-center gap-4 text-center">
           <Globe size={32} className="text-gray-600" />
           <p className="text-gray-400 font-mono">No sites monitored yet.</p>
-          <p className="text-gray-600 text-sm">Paste any URL above — the first probe runs within 30 seconds.</p>
+          <p className="text-gray-600 text-sm">Paste any URL above — the first probe runs within 60 seconds.</p>
         </div>
       ) : (
         <div className="space-y-3">

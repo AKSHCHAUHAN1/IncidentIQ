@@ -19,13 +19,17 @@ export default function Navbar() {
     refreshCount();
     const onScroll = () => setScrolled(window.scrollY > 20);
     window.addEventListener('scroll', onScroll);
-    socket.on('approval_needed',  () => setPendingApprovals(p => p + 1));
-    socket.on('remediation_done', refreshCount);
+
+    // new_prediction may add to the approval queue
+    socket.on('new_prediction', () => setPendingApprovals(p => p + 1));
+    // new_alert doesn't affect approvals badge but refresh to be safe
+    socket.on('new_alert', refreshCount);
+
     const t = setInterval(refreshCount, 30_000);
     return () => {
       window.removeEventListener('scroll', onScroll);
-      socket.off('approval_needed');
-      socket.off('remediation_done');
+      socket.off('new_prediction');
+      socket.off('new_alert');
       clearInterval(t);
     };
   }, []);

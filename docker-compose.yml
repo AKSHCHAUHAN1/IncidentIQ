@@ -64,7 +64,7 @@ services:
       STATUS_INTERVAL_HOURS:  6
       # Optional: speeds up CrUX fetching from 150/day to 150/100s
       # Get free key: console.cloud.google.com → Enable "Chrome UX Report API"
-      GOOGLE_API_KEY: ""
+      GOOGLE_API_KEY: "AIzaSyCb6nJx7lZNuDeQoPVqLchYd-TRY16JqWc"
     command: python3 src/collector_scheduler.py
     volumes:
       - ./services/website-probe/probe-targets.json:/app/probe-targets.json:ro
@@ -178,6 +178,19 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
+    restart: unless-stopped
+
+  # ── Frontend ─────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_URL: http://localhost:3000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api-gateway
     restart: unless-stopped
 
 

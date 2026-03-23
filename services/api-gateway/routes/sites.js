@@ -3,111 +3,115 @@ import { pool }   from "../db.js";
 
 const router = Router();
 
-// ── Helpers ───────────────────────────────────────────────────
-function urlToId(url) {
-  // "https://github.com/foo" → "github-com"
-  try {
-    const { hostname } = new URL(url);
-    return hostname.replace(/\./g, "-").replace(/[^a-z0-9-]/gi, "").toLowerCase();
-  } catch {
-    return url.replace(/[^a-z0-9]/gi, "-").toLowerCase().slice(0, 40);
-  }
-}
-
-function urlToName(url) {
-  try { return new URL(url).hostname; }
-  catch { return url; }
-}
-
-// GET /api/sites — list all monitored sites
+// GET /api/sites — list user-added sites only (exclude training)
 router.get("/", async (req, res) => {
   try {
     const r = await pool.query(
-      `SELECT s.*,
-              COUNT(i.id)                                  AS total_incidents,
-              COUNT(i.id) FILTER (WHERE i.severity='critical') AS critical_incidents
-       FROM incidents.monitored_sites s
-       LEFT JOIN incidents.incidents i ON i.service_id = s.id
-       WHERE s.active = TRUE
-       GROUP BY s.id
-       ORDER BY s.created_at DESC`
+      `SELECT ms.*,
+              lr.ttfb_ms AS last_response_ms,
+              lr.probed_at AS last_probed,
+              lr.status_code,
+              CASE
+                WHEN lr.ttfb_ms IS NULL THEN 'unknown'
+                WHEN lr.status_code >= 500 OR COALESCE(lr.error_rate, 0) >= 0.1 THEN 'down'
+                WHEN lr.ttfb_ms >= 2000 THEN 'down'
+                WHEN lr.ttfb_ms >= 1000 OR COALESCE(lr.error_rate, 0) >= 0.05 THEN 'degraded'
+                ELSE 'up'
+              END AS last_status
+       FROM public.monitored_sites ms
+       LEFT JOIN LATERAL (
+         SELECT ttfb_ms, probed_at, status_code, error_rate
+         FROM metrics.probe_readings pr
+         WHERE pr.url = ms.url
+         ORDER BY pr.probed_at DESC
+         LIMIT 1
+       ) lr ON true
+       WHERE ms.is_training_only = FALSE AND ms.is_active = TRUE
+       ORDER BY ms.added_at DESC`
     );
-    res.json({ sites: r.rows });
+    res.json({ success: true, sites: r.rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[sites GET /] error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// POST /api/sites — register a new URL to monitor
+// GET /api/sites/status — live status for all user sites
+router.get("/status", async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT ms.id, ms.url, ms.name,
+              lr.ttfb_ms, lr.dns_ms, lr.error_rate, lr.status_code, lr.ssl_days_left,
+              lr.probed_at AS last_probed,
+              CASE
+                WHEN lr.ttfb_ms IS NULL THEN 'unknown'
+                WHEN lr.status_code >= 500 OR COALESCE(lr.error_rate, 0) >= 0.1 THEN 'down'
+                WHEN lr.ttfb_ms >= 2000 THEN 'down'
+                WHEN lr.ttfb_ms >= 1000 OR COALESCE(lr.error_rate, 0) >= 0.05 THEN 'degraded'
+                ELSE 'up'
+              END AS status
+       FROM public.monitored_sites ms
+       LEFT JOIN LATERAL (
+         SELECT ttfb_ms, dns_ms, error_rate, status_code, ssl_days_left, probed_at
+         FROM metrics.probe_readings pr
+         WHERE pr.url = ms.url
+         ORDER BY pr.probed_at DESC
+         LIMIT 1
+       ) lr ON true
+       WHERE ms.is_training_only = FALSE AND ms.is_active = TRUE
+       ORDER BY ms.added_at DESC`
+    );
+    res.json({ success: true, sites: r.rows });
+  } catch (err) {
+    console.error("[sites GET /status] error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/sites — add a new user URL to monitor
 router.post("/", async (req, res) => {
   try {
     let { url, name } = req.body;
-    if (!url) return res.status(400).json({ error: "url is required" });
+    if (!url) return res.status(400).json({ success: false, error: "url is required" });
 
     // Normalise: ensure scheme present
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
 
     // Validate URL
     try { new URL(url); } catch {
-      return res.status(400).json({ error: "Invalid URL" });
+      return res.status(400).json({ success: false, error: "Invalid URL" });
     }
 
-    const id   = urlToId(url);
-    const displayName = name || urlToName(url);
-
-    await pool.query(
-      `INSERT INTO incidents.monitored_sites (id, url, name)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (url) DO UPDATE SET active = TRUE, name = EXCLUDED.name`,
-      [id, url, displayName]
-    );
+    const displayName = name || new URL(url).hostname;
 
     const r = await pool.query(
-      "SELECT * FROM incidents.monitored_sites WHERE id = $1", [id]
+      `INSERT INTO public.monitored_sites (url, name, is_training_only)
+       VALUES ($1, $2, FALSE)
+       ON CONFLICT (url) DO UPDATE SET is_active = TRUE, name = EXCLUDED.name
+       RETURNING *`,
+      [url, displayName]
     );
-    res.status(201).json({ site: r.rows[0] });
+
+    console.log(`[sites POST] Added user site: ${url}`);
+    res.status(201).json({ success: true, site: r.rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[sites POST] error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// DELETE /api/sites/:id — remove a monitored site and its data
+// DELETE /api/sites/:id — soft-delete (mark inactive)
 router.delete("/:id", async (req, res) => {
-  const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-    // Remove remediations linked to this site's incidents
-    await client.query(
-      "DELETE FROM incidents.remediations WHERE service_id = $1",
+    await pool.query(
+      "UPDATE public.monitored_sites SET is_active = FALSE WHERE id = $1",
       [req.params.id]
     );
-    // Remove incidents
-    await client.query(
-      "DELETE FROM incidents.incidents WHERE service_id = $1",
-      [req.params.id]
-    );
-    // Remove predictions
-    await client.query(
-      "DELETE FROM ml.predictions WHERE service_id = $1",
-      [req.params.id]
-    );
-    // Remove raw metrics
-    await client.query(
-      "DELETE FROM metrics.raw_metrics WHERE service_id = $1",
-      [req.params.id]
-    );
-    // Remove the site itself
-    await client.query(
-      "DELETE FROM incidents.monitored_sites WHERE id = $1",
-      [req.params.id]
-    );
-    await client.query("COMMIT");
-    res.json({ ok: true });
+    console.log(`[sites DELETE] Deactivated site id=${req.params.id}`);
+    res.json({ success: true });
   } catch (err) {
-    await client.query("ROLLBACK");
-    res.status(500).json({ error: err.message });
-  } finally {
-    client.release();
+    console.error("[sites DELETE] error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -115,28 +119,39 @@ router.delete("/:id", async (req, res) => {
 router.get("/:id/metrics", async (req, res) => {
   try {
     const { limit = 60 } = req.query;
+
+    // Get the URL for this site id
+    const site = await pool.query(
+      "SELECT url FROM public.monitored_sites WHERE id=$1", [req.params.id]
+    );
+    if (!site.rows.length) return res.status(404).json({ success: false, error: "Site not found" });
+
+    const siteUrl = site.rows[0].url;
+
     const r = await pool.query(
-      `SELECT time_bucket('30 seconds', time) AS bucket,
-              metric_name, AVG(value) AS value
-       FROM metrics.raw_metrics
-       WHERE service_id = $1 AND time > NOW() - INTERVAL '30 minutes'
-         AND metric_name IN ('ttfb_ms', 'dns_ms', 'error_rate', 'response_time_ms', 'latency', 'availability', 'status_code')
-       GROUP BY bucket, metric_name
-       ORDER BY bucket ASC`,
-      [req.params.id]
+      `SELECT probed_at AS time, ttfb_ms, dns_ms, tcp_ms, tls_ms,
+              error_rate, ssl_days_left, status_code
+       FROM metrics.probe_readings
+       WHERE url = $1 AND probed_at > NOW() - INTERVAL '30 minutes'
+       ORDER BY probed_at ASC
+       LIMIT $2`,
+      [siteUrl, parseInt(limit)]
     );
 
-    // Pivot to [{time, response_time, error_rate, ...}]
-    const buckets = {};
-    for (const row of r.rows) {
-      if (!buckets[row.bucket]) buckets[row.bucket] = { time: row.bucket };
-      buckets[row.bucket][row.metric_name] = parseFloat(row.value);
-    }
+    const rows = r.rows.map(row => ({
+      time: row.time,
+      ttfb_ms: parseFloat(row.ttfb_ms || 0),
+      response_time_ms: parseFloat(row.ttfb_ms || 0),
+      dns_ms: parseFloat(row.dns_ms || 0),
+      error_rate: parseFloat(row.error_rate || 0),
+      ssl_days_left: parseFloat(row.ssl_days_left || 0),
+      status_code: parseInt(row.status_code || 0),
+    }));
 
-    const rows = Object.values(buckets).slice(-parseInt(limit));
-    res.json({ metrics: rows });
+    res.json({ success: true, metrics: rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("[sites GET /:id/metrics] error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

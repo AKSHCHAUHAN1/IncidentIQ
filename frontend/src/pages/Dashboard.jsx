@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { motion, useMotionValue, useTransform } from 'framer-motion';
+import { motion, useMotionValue, useTransform, AnimatePresence } from 'framer-motion';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { socket } from '../socket';
 import { api } from '../lib/api';
@@ -44,43 +44,78 @@ const TiltCard = ({ children, className = "" }) => {
   );
 };
 
+// ── Toast notification component ──────────────────────────────
+function Toast({ toast, onDismiss }) {
+  useEffect(() => {
+    const t = setTimeout(() => onDismiss(toast.id), 8000);
+    return () => clearTimeout(t);
+  }, [toast.id, onDismiss]);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: 100, scale: 0.95 }}
+      animate={{ opacity: 1, x: 0, scale: 1 }}
+      exit={{ opacity: 0, x: 100, scale: 0.95 }}
+      className="bg-red-500/10 border border-red-500/30 text-red-300 rounded-xl px-5 py-4 backdrop-blur-xl shadow-2xl max-w-sm"
+    >
+      <div className="flex items-start gap-3">
+        <span className="text-lg">⚠</span>
+        <div className="min-w-0">
+          <p className="font-bold text-sm text-red-400 truncate">{toast.title}</p>
+          <p className="text-xs text-red-300/80 mt-1">{toast.message}</p>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 export default function Dashboard() {
   const headingText = useTypewriter(["Predict SLA Breaches", "Detect Latency Drift", "Classify Root Cause"]);
 
   // ── State ──────────────────────────────────────────────────
   const [stats, setStats] = useState([
-    { label: "Total Incidents",    value: "—",  sub: "loading...",     alert: false },
-    { label: "Active Alerts",      value: "—",  sub: "loading...",     alert: false },
-    { label: "SLA Compliance (24h)", value: "—", sub: "loading..." },
-    { label: "Reports Dispatched", value: "—",  sub: "loading..." },
+    { label: "Sites Up",            value: "0",  sub: "loading...",     alert: false },
+    { label: "Degraded",            value: "0",  sub: "loading...",     alert: false },
+    { label: "Down / Error",        value: "0",  sub: "loading...",     alert: false },
+    { label: "SLA Compliance (24h)",value: "—",  sub: "loading..." },
   ]);
   const [metricsData, setMetricsData]         = useState([]);
   const [activePredictions, setActivePredictions] = useState([]);
   const [activeService, setActiveService]         = useState(null);
+  const [toasts, setToasts]                     = useState([]);
   const timer = useRef(null);
+  const toastId = useRef(0);
+
+  function addToast(title, message) {
+    const id = ++toastId.current;
+    setToasts(prev => [...prev, { id, title, message }]);
+  }
+
+  function dismissToast(id) {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }
 
   // ── Fetch helpers ─────────────────────────────────────────
   async function fetchSummary() {
     try {
       const d = await api.summary();
-      const activeAlerts = (d.incidents?.predicted || 0) + (d.remediations?.pending || 0);
       setStats([
-        { label: "Total Incidents", value: String(d.incidents?.total ?? 0), sub: `${d.incidents?.critical ?? 0} critical`, alert: false },
-        { label: "Active Alerts", value: String(activeAlerts), sub: `${d.remediations?.pending ?? 0} pending approval`, alert: activeAlerts > 0 },
-        { label: "SLA Compliance (24h)", value: `${d.sla?.compliance_pct ?? 0}%`, sub: `threshold ${d.sla?.threshold_ms ?? 2000}ms` },
-        { label: "Reports Dispatched", value: String(d.remediations?.alert_reports ?? 0), sub: `${d.predictions?.last_24h ?? 0} predictions (24h)` },
+        { label: "Sites Up",      value: String(d.sites?.up ?? 0),       sub: "user-monitored",      alert: false },
+        { label: "Degraded",      value: String(d.sites?.degraded ?? 0), sub: "performance issues",  alert: (d.sites?.degraded ?? 0) > 0 },
+        { label: "Down / Error",  value: String(d.sites?.down ?? 0),     sub: `${d.incidents?.critical ?? 0} critical`,  alert: (d.sites?.down ?? 0) > 0 },
+        { label: "SLA Compliance (24h)", value: `${d.sla?.compliance_pct ?? 100}%`, sub: `threshold ${d.sla?.threshold_ms ?? 2000}ms` },
       ]);
     } catch {}
   }
 
   async function fetchMetrics() {
     try {
-      // Resolve the most active service if we don't have one yet
       let svc = activeService;
       if (!svc) {
-        const svcData = await api.services();
-        if (svcData.services?.length) {
-          svc = svcData.services[0].service_id;
+        // Use the first user site for the chart
+        const siteData = await api.sitesStatus();
+        if (siteData.sites?.length) {
+          svc = siteData.sites[0].url;
           setActiveService(svc);
         }
       }
@@ -102,7 +137,7 @@ export default function Dashboard() {
       const d = await api.predictions({ limit: 20 });
       if (d.predictions?.length) {
         setActivePredictions(d.predictions.map(p => ({
-          service:  p.service_id,
+          service:  p.url || p.service_id,
           conf:     (p.confidence * 100).toFixed(0),
           issue:    `${(p.prediction_data?.root_cause || p.severity || 'normal').replace(/_/g, ' ')}${p.prediction_data?.breach_eta_min ? ` • SLA ${p.prediction_data.breach_eta_min}m` : ''}`,
           severity: p.severity,
@@ -116,17 +151,42 @@ export default function Dashboard() {
     timer.current = setInterval(() => { fetchSummary(); fetchMetrics(); fetchPredictions(); }, 10_000);
 
     // Live socket events
-    socket.on('prediction', (pred) => {
+    socket.on('new_prediction', (pred) => {
+      console.log('[Dashboard] new_prediction received:', pred);
       setActivePredictions(prev => [{
-        service:  pred.service_id,
+        service:  pred.url || pred.service_id,
         conf:     (pred.confidence * 100).toFixed(0),
-        issue:    `${pred.severity?.toUpperCase()} — ${(pred.confidence * 100).toFixed(0)}% confidence`,
-        severity: pred.severity,
+        issue:    `${pred.anomaly_type?.replace(/_/g, ' ') || pred.severity?.toUpperCase()} — ${(pred.confidence * 100).toFixed(0)}% confidence`,
+        severity: pred.severity || 'warning',
       }, ...prev].slice(0, 20));
       fetchSummary();
     });
 
-    return () => { clearInterval(timer.current); socket.off('prediction'); };
+    socket.on('new_alert', (alert) => {
+      console.log('[Dashboard] new_alert received:', alert);
+      addToast(
+        `Anomaly detected on ${alert.url || alert.service_id}`,
+        `${alert.anomaly_type?.replace(/_/g, ' ')} — ${(alert.confidence * 100).toFixed(0)}% confidence`
+      );
+      fetchSummary();
+    });
+
+    socket.on('metrics_update', (data) => {
+      console.log('[Dashboard] metrics_update received:', data);
+      setStats(prev => [
+        { ...prev[0], value: String(data.sites_up ?? prev[0].value) },
+        { ...prev[1], value: String(data.degraded ?? prev[1].value), alert: (data.degraded ?? 0) > 0 },
+        { ...prev[2], value: String(data.down ?? prev[2].value), alert: (data.down ?? 0) > 0 },
+        prev[3],
+      ]);
+    });
+
+    return () => {
+      clearInterval(timer.current);
+      socket.off('new_prediction');
+      socket.off('new_alert');
+      socket.off('metrics_update');
+    };
   }, []);
 
   const containerVars = {
@@ -138,19 +198,27 @@ export default function Dashboard() {
     <motion.main initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       className="relative z-10 pt-40 px-10 max-w-7xl mx-auto flex flex-col items-center">
 
+      {/* ── Toast Notifications ── */}
+      <div className="fixed top-24 right-6 z-[100] space-y-3">
+        <AnimatePresence>
+          {toasts.map(toast => (
+            <Toast key={toast.id} toast={toast} onDismiss={dismissToast} />
+          ))}
+        </AnimatePresence>
+      </div>
+
       {/* Hero — untouched from your design */}
       <div className="replica-3d-card text-center mb-16 p-10 relative w-full max-w-4xl">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[300px] bg-indigo/20 blur-[100px] rounded-full pointer-events-none z-0" />
         <div className="relative z-10 inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-green-500/10 border border-green-500/30 text-green-400 text-xs font-mono mb-8 backdrop-blur-sm shadow-[0_0_15px_rgba(34,197,94,0.2)]">
           <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_#22c55e]" />
-          System Online & Monitoring
+          System Online &amp; Monitoring
         </div>
-        {/* Bulletproof Typewriter Heading */}
         <h1 className="relative z-10 text-white mb-8 font-extrabold tracking-tighter drop-shadow-[0_0_15px_rgba(255,255,255,0.4)]">
-          <motion.span 
-            key={headingText} 
-            initial={{ opacity: 0, y: 10 }} 
-            animate={{ opacity: 1, y: 0 }} 
+          <motion.span
+            key={headingText}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4 }}
             className="inline-block"
           >
@@ -185,7 +253,7 @@ export default function Dashboard() {
           className="absolute top-0 left-0 w-1/3 h-full bg-gradient-to-r from-transparent via-indigo to-transparent" />
       </div>
 
-      {/* Stat Cards — now with real data */}
+      {/* Stat Cards — Sites Up / Degraded / Down / SLA */}
       <motion.div variants={containerVars} initial="hidden" animate="show" className="grid grid-cols-1 md:grid-cols-4 gap-6 w-full mb-12">
         {stats.map((stat, i) => (
           <TiltCard key={i} className="h-40">

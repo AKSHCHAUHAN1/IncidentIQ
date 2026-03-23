@@ -3,7 +3,7 @@ import cors from "cors";
 import { createServer } from "http";
 import rateLimit from "express-rate-limit";
 import { generateToken, authMiddleware } from "./auth.js";
-import { initWebSocket, emitPrediction, emitApprovalNeeded, emitRemediationDone } from "./websocket.js";
+import { initWebSocket, emitNewPrediction, emitNewAlert } from "./websocket.js";
 import predictionsRouter from "./routes/predictions.js";
 import incidentsRouter   from "./routes/incidents.js";
 import approvalsRouter   from "./routes/approvals.js";
@@ -107,9 +107,12 @@ app.get("/api/services", authMiddleware, async (req, res) => {
 // No auth — internal Docker network only
 app.post("/internal/event", (req, res) => {
   const { type, data } = req.body;
-  if      (type === "prediction")       emitPrediction(data);
-  else if (type === "approval_needed")  emitApprovalNeeded(data);
-  else if (type === "remediation_done") emitRemediationDone(data);
+  console.log(`[INTERNAL EVENT] type=${type}`, data?.url || data?.service_id);
+  if      (type === "new_prediction")   emitNewPrediction(data);
+  else if (type === "new_alert")        emitNewAlert(data);
+  // Legacy compat
+  else if (type === "prediction")       emitNewPrediction(data);
+  else if (type === "approval_needed")  emitNewPrediction(data);
   res.json({ ok: true });
 });
 
