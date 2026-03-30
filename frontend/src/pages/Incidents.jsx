@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, X, Loader, CheckCircle2, XCircle, MinusCircle } from 'lucide-react';
+import { Search, X, Loader, CheckCircle2, XCircle, MinusCircle, RefreshCw } from 'lucide-react';
 import { api } from '../lib/api';
 
 export default function Incidents() {
@@ -9,11 +9,17 @@ export default function Incidents() {
   const [incidents, setIncidents]                 = useState([]);
   const [loading, setLoading]                     = useState(true);
 
+  async function fetchIncidents() {
+    setLoading(true);
+    try {
+      const d = await api.incidents({ limit: 100 });
+      setIncidents(d.incidents || []);
+    } catch (err) { console.error(err); }
+    finally { setLoading(false); }
+  }
+
   useEffect(() => {
-    api.incidents({ limit: 100 })
-      .then(d => setIncidents(d.incidents || []))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    fetchIncidents();
   }, []);
 
   const filteredIncidents = useMemo(() =>
@@ -62,7 +68,12 @@ export default function Incidents() {
 
       <div className={`flex-1 transition-all duration-500 ${selectedIncident ? 'pr-[440px]' : ''}`}>
         <div className="flex justify-between items-end mb-8">
-          <h1 className="text-3xl font-bold tracking-tighter">Incident Registry</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-3xl font-bold tracking-tighter">Incident Registry</h1>
+            <button onClick={fetchIncidents} className="text-gray-500 hover:text-white transition-colors">
+              <RefreshCw size={16} />
+            </button>
+          </div>
           <div className="relative group metal-container-static w-72" style={{ '--m-radius': '9999px', '--m-border': '1px' }}>
             <div className="metal-surface flex items-center pl-4 pr-4 py-2.5">
               <Search className="text-gray-500 w-[18px] h-[18px] transition-colors group-focus-within:text-white shrink-0" />

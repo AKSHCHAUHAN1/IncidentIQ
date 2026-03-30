@@ -13,9 +13,10 @@ router.get("/", async (req, res) => {
               lr.status_code,
               CASE
                 WHEN lr.ttfb_ms IS NULL THEN 'unknown'
-                WHEN lr.status_code >= 500 OR COALESCE(lr.error_rate, 0) >= 0.1 THEN 'down'
+                WHEN lr.status_code = 0 OR lr.status_code IS NULL THEN 'down'
+                WHEN lr.status_code >= 500 OR COALESCE(lr.error_rate, 0) >= 0.5 THEN 'down'
                 WHEN lr.ttfb_ms >= 2000 THEN 'down'
-                WHEN lr.ttfb_ms >= 1000 OR COALESCE(lr.error_rate, 0) >= 0.05 THEN 'degraded'
+                WHEN lr.ttfb_ms >= 1000 OR COALESCE(lr.error_rate, 0) >= 0.15 THEN 'degraded'
                 ELSE 'up'
               END AS last_status
        FROM public.monitored_sites ms
@@ -45,9 +46,10 @@ router.get("/status", async (req, res) => {
               lr.probed_at AS last_probed,
               CASE
                 WHEN lr.ttfb_ms IS NULL THEN 'unknown'
-                WHEN lr.status_code >= 500 OR COALESCE(lr.error_rate, 0) >= 0.1 THEN 'down'
+                WHEN lr.status_code = 0 OR lr.status_code IS NULL THEN 'down'
+                WHEN lr.status_code >= 500 OR COALESCE(lr.error_rate, 0) >= 0.5 THEN 'down'
                 WHEN lr.ttfb_ms >= 2000 THEN 'down'
-                WHEN lr.ttfb_ms >= 1000 OR COALESCE(lr.error_rate, 0) >= 0.05 THEN 'degraded'
+                WHEN lr.ttfb_ms >= 1000 OR COALESCE(lr.error_rate, 0) >= 0.15 THEN 'degraded'
                 ELSE 'up'
               END AS status
        FROM public.monitored_sites ms
@@ -100,18 +102,135 @@ router.post("/", async (req, res) => {
   }
 });
 
-// DELETE /api/sites/:id — soft-delete (mark inactive)
+// DELETE /api/sites/:id — HARD DELETE: removes site + ALL associated data
 router.delete("/:id", async (req, res) => {
+  const client = await pool.connect();
+  const siteId = Number.parseInt(req.params.id, 10);
+
+  if (!Number.isInteger(siteId) || siteId <= 0) {
+    client.release();
+    return res.status(400).json({ success: false, error: "Invalid site id" });
+  }
+
   try {
-    await pool.query(
-      "UPDATE public.monitored_sites SET is_active = FALSE WHERE id = $1",
-      [req.params.id]
+    await client.query("BEGIN");
+
+    // Get the URL first so we can clean up related tables
+    const siteResult = await client.query(
+      "SELECT url FROM public.monitored_sites WHERE id = $1 AND is_training_only = FALSE",
+      [siteId]
     );
-    console.log(`[sites DELETE] Deactivated site id=${req.params.id}`);
-    res.json({ success: true });
+
+    if (!siteResult.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, error: "Site not found or is a training site" });
+    }
+
+    const { url } = siteResult.rows[0];
+    const serviceId = (() => {
+      try {
+        return new URL(url).hostname;
+      } catch {
+        return url;
+      }
+    })();
+    console.log(`[sites DELETE] Hard deleting site: ${url}`);
+
+    // 1. Delete probe readings (TimescaleDB hypertable — use DELETE not TRUNCATE)
+    const probeResult = await client.query(
+      "DELETE FROM metrics.probe_readings WHERE url = $1",
+      [url]
+    );
+    console.log(`[sites DELETE] Removed ${probeResult.rowCount} probe readings`);
+
+    // 2. Delete labeled probe readings (ML training data)
+    const labelResult = await client.query(
+      "DELETE FROM ml.labeled_probe_readings WHERE url = $1",
+      [url]
+    );
+    console.log(`[sites DELETE] Removed ${labelResult.rowCount} labeled readings`);
+
+    const predictionUrlCol = await client.query(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = 'ml' AND table_name = 'predictions' AND column_name = 'url'
+       ) AS has_url`
+    );
+    const incidentUrlCol = await client.query(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM information_schema.columns
+         WHERE table_schema = 'incidents' AND table_name = 'incidents' AND column_name = 'url'
+       ) AS has_url`
+    );
+
+    const hasPredictionUrl = predictionUrlCol.rows[0]?.has_url === true;
+    const hasIncidentUrl = incidentUrlCol.rows[0]?.has_url === true;
+
+    // 3. Delete predictions (schema-compatible: url in new schema, service_id in legacy)
+    const predResult = hasPredictionUrl
+      ? await client.query("DELETE FROM ml.predictions WHERE url = $1", [url])
+      : await client.query("DELETE FROM ml.predictions WHERE service_id = $1", [serviceId]);
+    console.log(`[sites DELETE] Removed ${predResult.rowCount} predictions`);
+
+    // 4. Delete remediations linked to this site's incidents (schema-compatible)
+    const remResult = hasIncidentUrl
+      ? await client.query(
+          `DELETE FROM incidents.remediations
+           WHERE incident_id IN (SELECT id FROM incidents.incidents WHERE url = $1)`,
+          [url]
+        )
+      : await client.query(
+          `DELETE FROM incidents.remediations
+           WHERE incident_id IN (SELECT id FROM incidents.incidents WHERE service_id = $1)`,
+          [serviceId]
+        );
+    console.log(`[sites DELETE] Removed ${remResult.rowCount} remediations`);
+
+    // 5. Delete incidents (schema-compatible)
+    const incResult = hasIncidentUrl
+      ? await client.query("DELETE FROM incidents.incidents WHERE url = $1", [url])
+      : await client.query("DELETE FROM incidents.incidents WHERE service_id = $1", [serviceId]);
+    console.log(`[sites DELETE] Removed ${incResult.rowCount} incidents`);
+
+    // 6. Delete URL baselines
+    await client.query("DELETE FROM ml.url_baselines WHERE url = $1", [url]);
+
+    // 7. Delete status incidents for this URL
+    await client.query("DELETE FROM ml.status_incidents WHERE url = $1", [url]);
+
+    // 8. Finally delete the site record itself
+    const deleteSiteResult = await client.query(
+      "DELETE FROM public.monitored_sites WHERE id = $1",
+      [siteId]
+    );
+
+    if (deleteSiteResult.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, error: "Site not found" });
+    }
+
+    await client.query("COMMIT");
+
+    console.log(`[sites DELETE] Complete — all data for ${url} removed`);
+    res.json({
+      success: true,
+      deleted: {
+        site_id: siteId,
+        url,
+        probe_readings: probeResult.rowCount,
+        labeled_readings: labelResult.rowCount,
+        predictions: predResult.rowCount,
+        incidents: incResult.rowCount,
+      }
+    });
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("[sites DELETE] error:", err.message);
     res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -120,7 +239,6 @@ router.get("/:id/metrics", async (req, res) => {
   try {
     const { limit = 60 } = req.query;
 
-    // Get the URL for this site id
     const site = await pool.query(
       "SELECT url FROM public.monitored_sites WHERE id=$1", [req.params.id]
     );
@@ -139,13 +257,13 @@ router.get("/:id/metrics", async (req, res) => {
     );
 
     const rows = r.rows.map(row => ({
-      time: row.time,
-      ttfb_ms: parseFloat(row.ttfb_ms || 0),
+      time:             row.time,
+      ttfb_ms:          parseFloat(row.ttfb_ms || 0),
       response_time_ms: parseFloat(row.ttfb_ms || 0),
-      dns_ms: parseFloat(row.dns_ms || 0),
-      error_rate: parseFloat(row.error_rate || 0),
-      ssl_days_left: parseFloat(row.ssl_days_left || 0),
-      status_code: parseInt(row.status_code || 0),
+      dns_ms:           parseFloat(row.dns_ms || 0),
+      error_rate:       parseFloat(row.error_rate || 0),
+      ssl_days_left:    parseFloat(row.ssl_days_left || 0),
+      status_code:      parseInt(row.status_code || 0),
     }));
 
     res.json({ success: true, metrics: rows });

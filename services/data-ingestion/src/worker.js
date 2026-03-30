@@ -29,42 +29,48 @@ function getState(serviceId) {
 }
 
 function buildMetricText(metrics) {
-  const ttfb = metrics.ttfb_ms ?? 0;
-  const dns = metrics.dns_ms ?? 0;
-  const errorRate = metrics.error_rate ?? 0;
-  const ssl = metrics.ssl_days_left ?? 365;
-  const status = metrics.status_code ?? 200;
+  const ttfb      = metrics.ttfb_ms      ?? 0;
+  const dns       = metrics.dns_ms       ?? 0;
+  const errorRate = metrics.error_rate   ?? 0;
+  const ssl       = metrics.ssl_days_left ?? 365;
+  const status    = metrics.status_code  ?? 200;
 
   const tokens = [];
 
-  if (ttfb < 250) tokens.push("ttfb_fast");
-  else if (ttfb < 800) tokens.push("ttfb_moderate");
+  // TTFB tokens — match label_probe_data.py thresholds exactly
+  if      (ttfb < 200)  tokens.push("ttfb_fast");
+  else if (ttfb < 600)  tokens.push("ttfb_moderate");
   else if (ttfb < 1500) tokens.push("ttfb_slow");
-  else tokens.push("ttfb_very_slow");
+  else                  tokens.push("ttfb_very_slow");
 
-  if (dns < 40) tokens.push("dns_fast");
-  else if (dns < 120) tokens.push("dns_moderate");
-  else if (dns < 300) tokens.push("dns_slow");
-  else tokens.push("dns_very_slow");
+  // DNS tokens — match label_probe_data.py
+  if      (dns < 30)  tokens.push("dns_fast");
+  else if (dns < 100) tokens.push("dns_moderate");
+  else if (dns < 250) tokens.push("dns_slow");
+  else                tokens.push("dns_very_slow");
 
+  // TTFB/DNS ratio — match label_probe_data.py
   const ratio = ttfb / Math.max(dns, 1);
-  if (ratio < 3) tokens.push("ratio_dns_dominant");
-  else if (ratio < 7) tokens.push("ratio_balanced");
-  else tokens.push("ratio_origin_dominant");
+  if      (ratio < 3) tokens.push("ratio_dns_dominant");
+  else if (ratio < 8) tokens.push("ratio_balanced");
+  else                tokens.push("ratio_origin_dominant");
 
-  if (errorRate < 1) tokens.push("errors_clean");
-  else if (errorRate < 5) tokens.push("errors_low");
-  else if (errorRate < 15) tokens.push("errors_high");
-  else tokens.push("errors_critical");
+  // Error rate tokens — match label_probe_data.py (0.0-1.0 scale)
+  if      (errorRate < 0.02) tokens.push("errors_clean");
+  else if (errorRate < 0.10) tokens.push("errors_low");
+  else if (errorRate < 0.30) tokens.push("errors_high");
+  else                       tokens.push("errors_critical");
 
-  if (ssl < 7) tokens.push("ssl_critical");
+  // SSL tokens
+  if      (ssl < 7)  tokens.push("ssl_critical");
   else if (ssl < 14) tokens.push("ssl_warning");
   else if (ssl < 30) tokens.push("ssl_soon");
-  else tokens.push("ssl_ok");
+  else               tokens.push("ssl_ok");
 
-  if (status >= 500) tokens.push("status_server_error");
+  // Status code tokens
+  if      (status >= 500) tokens.push("status_server_error");
   else if (status >= 400) tokens.push("status_client_error");
-  else tokens.push("status_ok");
+  else                    tokens.push("status_ok");
 
   return tokens.join(" ");
 }

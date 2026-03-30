@@ -55,6 +55,7 @@ def load_data():
     FROM ml.labeled_probe_readings
     WHERE ttfb_ms IS NOT NULL
       AND dns_ms IS NOT NULL
+      AND COALESCE(label_source, 'programmatic') != 'synthetic'
     ORDER BY url, probed_at
     """
 

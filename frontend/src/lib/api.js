@@ -5,21 +5,18 @@
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
-async function ensureAuth() {
-  if (localStorage.getItem('iq_token')) return;
-  const res = await fetch(`${BASE}/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'admin' }),
-  });
-  const data = await res.json();
-  if (data.token) localStorage.setItem('iq_token', data.token);
+async function parseJsonSafe(res) {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
 }
 
-async function call(path, opts = {}) {
-  await ensureAuth();
-  const token = localStorage.getItem('iq_token') || '';
-  let res = await fetch(`${BASE}${path}`, {
+function request(path, opts = {}, token = '') {
+  return fetch(`${BASE}${path}`, {
     ...opts,
     headers: {
       'Content-Type': 'application/json',
@@ -27,23 +24,46 @@ async function call(path, opts = {}) {
       ...opts.headers,
     },
   });
+}
+
+async function ensureAuth() {
+  if (localStorage.getItem('iq_token')) return;
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'admin' }),
+  });
+  const data = await parseJsonSafe(res);
+  if (!res.ok || !data.token) {
+    throw new Error(data.error || 'Authentication failed');
+  }
+  localStorage.setItem('iq_token', data.token);
+}
+
+async function call(path, opts = {}) {
+  await ensureAuth();
+  let token = localStorage.getItem('iq_token') || '';
+  let res = await request(path, opts, token);
 
   // Token expired — re-auth once
   if (res.status === 401) {
     localStorage.removeItem('iq_token');
     await ensureAuth();
-    const newToken = localStorage.getItem('iq_token') || '';
-    res = await fetch(`${BASE}${path}`, {
-      ...opts,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${newToken}`,
-        ...opts.headers,
-      },
-    });
+    token = localStorage.getItem('iq_token') || '';
+    res = await request(path, opts, token);
   }
 
-  return res.json();
+  const data = await parseJsonSafe(res);
+
+  if (!res.ok) {
+    const message = data.error || data.message || `Request failed with status ${res.status}`;
+    const err = new Error(message);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+
+  return data;
 }
 
 export const api = {

@@ -43,6 +43,8 @@ services:
       REDIS_HOST:         redis
       PROBE_INTERVAL_MS:  60000
       REQUEST_TIMEOUT_MS: 15000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:    { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -132,7 +134,7 @@ services:
       DB_PASSWORD:  postgres
       DB_NAME:      incident_predictor
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/incident_predictor
-      INPUT_WINDOW: 60
+      INPUT_WINDOW: 10
       ML_URL:       http://ml-service:8000/ensemble
       DECISION_URL: http://decision-engine:5000/evaluate
     depends_on:

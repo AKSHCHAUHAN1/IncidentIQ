@@ -185,6 +185,27 @@ def _root_cause_rule(ttfb_ms: float, dns_ms: float, error_rate: float, ssl_days_
     return "normal"
 
 
+def _build_message(root_cause, breach_eta_min, current_ttfb=None):
+    """Build a human-readable summary message for the ensemble response."""
+    explanations = {
+        "ssl_expiry_warning": "SSL certificate nearing expiry",
+        "error_spike": "Error rate elevated",
+        "dns_degradation": "DNS resolution degraded",
+        "origin_slowdown": "Origin server slowdown detected",
+        "latency_spike": "Overall latency spike detected",
+        "cdn_throttling": "CDN throttling detected",
+        "timeout_pattern": "Timeout pattern detected",
+        "normal": "All metrics within normal bounds",
+    }
+    msg = explanations.get(root_cause, root_cause.replace("_", " ") + " detected")
+    if current_ttfb is not None:
+        msg += f". TTFB {int(current_ttfb)}ms"
+    if breach_eta_min is not None:
+        msg += f". Estimated SLA breach in {breach_eta_min} minutes"
+    msg += "."
+    return msg
+
+
 def _breach_eta(ttfb_forecast: np.ndarray, threshold_ms: float) -> Optional[int]:
     crossings = np.where(ttfb_forecast >= threshold_ms)[0]
     if crossings.size == 0:
@@ -267,45 +288,8 @@ def classify_log(req: LogRequest):
 @app.post("/ensemble")
 def ensemble_predict(req: EnsembleRequest):
     arr = np.array(req.metrics_window, dtype=np.float32)
-
-    # Graceful fallback when LSTM is not loaded (first boot, before training)
-    if lstm_model is None:
-        current = arr[-1] if len(arr) > 0 else np.zeros(len(FEATURES))
-        idx = {f: i for i, f in enumerate(FEATURES)}
-        current_ttfb = float(current[idx["ttfb_ms"]])
-        current_dns = float(current[idx["dns_ms"]])
-        current_error = float(current[idx["error_rate"]])
-        current_ssl = float(current[idx["ssl_days_left"]])
-        root_cause = _root_cause_rule(current_ttfb, current_dns, current_error, current_ssl)
-        return {
-            "severity": "normal",
-            "confidence": 0.15,
-            "root_cause": root_cause,
-            "breach_eta_min": None,
-            "sla_threshold_ms": SLA_TTFB_MS,
-            "ttfb_forecast_ms": [],
-            "prediction": [],
-            "lstm_prediction": [],
-            "iso_flag": 1,
-            "pattern_label": "normal",
-            "pattern_probabilities": {},
-            "current_metrics": {
-                "ttfb_ms": current_ttfb,
-                "dns_ms": current_dns,
-                "error_rate": current_error,
-                "ssl_days_left": current_ssl,
-            },
-            "forecast_worst": {
-                "ttfb_ms": current_ttfb,
-                "dns_ms": current_dns,
-                "error_rate": current_error,
-                "ssl_days_left": current_ssl,
-            },
-            "_note": "Models not trained yet — returning low-confidence default",
-        }
-
-    _validate_shape(arr)
-    raw_pred = _run_lstm(arr)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
 
     idx = {f: i for i, f in enumerate(FEATURES)}
     ttfb_idx = idx["ttfb_ms"]
@@ -313,42 +297,73 @@ def ensemble_predict(req: EnsembleRequest):
     err_idx = idx["error_rate"]
     ssl_idx = idx["ssl_days_left"]
 
-    current = arr[-1]
-    forecast_last = raw_pred[-1]
-
+    current = arr[-1] if len(arr) > 0 else np.zeros(len(FEATURES))
     current_ttfb = float(current[ttfb_idx])
     current_dns = float(current[dns_idx])
     current_error = float(current[err_idx])
     current_ssl = float(current[ssl_idx])
 
-    forecast_ttfb = raw_pred[:, ttfb_idx]
-    worst_ttfb = float(np.max(forecast_ttfb))
-    breach_eta = _breach_eta(forecast_ttfb, SLA_TTFB_MS)
+    # ── LSTM inference (requires exactly INPUT_WINDOW rows) ────
+    raw_pred = None
+    forecast_ttfb = np.array([])
+    breach_eta = None
+    worst_ttfb = current_ttfb
+    has_lstm = False
 
+    if lstm_model is not None and arr.shape == (INPUT_WINDOW, len(FEATURES)):
+        try:
+            raw_pred = _run_lstm(arr)
+            forecast_ttfb = raw_pred[:, ttfb_idx]
+            worst_ttfb = float(np.max(forecast_ttfb))
+            breach_eta = _breach_eta(forecast_ttfb, SLA_TTFB_MS)
+            has_lstm = True
+        except Exception as e:
+            print(f"[ensemble] LSTM error: {e}")
+
+    # ── Isolation Forest inference (works on single row) ──────
+    # Must use 7 features matching train_models.py training order:
+    # [ttfb_ms, dns_ms, error_rate, ssl_days_left, origin_time_ms, ttfb_zscore, dns_zscore]
     iso_flag = 1
     if iso_model is not None:
         try:
-            eval_row = np.array([[current_ttfb, current_dns, current_error, current_ssl]], dtype=np.float32)
+            origin_time = current_ttfb - current_dns
+
+            # Z-scores using saved baseline
+            if baseline is not None:
+                b_mean = baseline["mean"]  # [ttfb, dns, error_rate, ssl]
+                b_std  = baseline["std"]
+                ttfb_z = (current_ttfb - b_mean[0]) / b_std[0] if b_std[0] > 0 else 0.0
+                dns_z  = (current_dns  - b_mean[1]) / b_std[1] if b_std[1] > 0 else 0.0
+            else:
+                ttfb_z = 0.0
+                dns_z  = 0.0
+
+            eval_row = np.array([[current_ttfb, current_dns, current_error, current_ssl,
+                                  origin_time, ttfb_z, dns_z]], dtype=np.float32)
             if if_scaler is not None:
                 eval_row = if_scaler.transform(eval_row)
             iso_flag = int(iso_model.predict(eval_row)[0])
-        except Exception:
+        except Exception as e:
+            print(f"[ensemble] IF error: {e}")
             iso_flag = 1
 
+    # ── Pattern classifier inference ─────────────────────────
     pattern_label = "normal"
     pattern_probabilities = {}
     if log_classifier is not None and req.log_text:
-        pred = log_classifier.predict([req.log_text])[0]
-        pattern_label = _normalize_classifier_label(pred)
-        pattern_probabilities = _classifier_probabilities(req.log_text)
+        try:
+            pred = log_classifier.predict([req.log_text])[0]
+            pattern_label = _normalize_classifier_label(pred)
+            pattern_probabilities = _classifier_probabilities(req.log_text)
+        except Exception:
+            pass
 
+    # ── Root cause determination ─────────────────────────────
     root_cause = pattern_label if pattern_label in ANOMALY_LABELS else _root_cause_rule(
-        current_ttfb,
-        current_dns,
-        current_error,
-        current_ssl,
+        current_ttfb, current_dns, current_error, current_ssl,
     )
 
+    # ── Severity ─────────────────────────────────────────────
     if breach_eta is not None and breach_eta <= 10:
         severity = "critical"
     elif current_ttfb >= SLA_TTFB_MS or current_error >= 15 or iso_flag == -1:
@@ -360,6 +375,7 @@ def ensemble_predict(req: EnsembleRequest):
     else:
         severity = "normal"
 
+    # ── Confidence ───────────────────────────────────────────
     confidence = 0.2
     confidence += min(current_ttfb / SLA_TTFB_MS, 1.0) * 0.35
     confidence += min(current_error / 20.0, 1.0) * 0.2
@@ -369,15 +385,31 @@ def ensemble_predict(req: EnsembleRequest):
     confidence += 0.1 if root_cause in ANOMALY_LABELS else 0.0
     confidence = min(float(confidence), 0.99)
 
+    # ── Build response ───────────────────────────────────────
+    message = _build_message(root_cause, breach_eta, current_ttfb)
+
+    forecast_worst = {
+        "ttfb_ms": worst_ttfb,
+        "dns_ms": current_dns,
+        "error_rate": current_error,
+        "ssl_days_left": current_ssl,
+    }
+    if raw_pred is not None:
+        forecast_last = raw_pred[-1]
+        forecast_worst["dns_ms"] = float(forecast_last[dns_idx])
+        forecast_worst["error_rate"] = float(forecast_last[err_idx])
+        forecast_worst["ssl_days_left"] = float(forecast_last[ssl_idx])
+
     return {
         "severity": severity,
         "confidence": confidence,
         "root_cause": root_cause,
         "breach_eta_min": breach_eta,
+        "message": message,
         "sla_threshold_ms": SLA_TTFB_MS,
         "ttfb_forecast_ms": forecast_ttfb.tolist(),
-        "prediction": raw_pred.tolist(),
-        "lstm_prediction": raw_pred.tolist(),
+        "prediction": raw_pred.tolist() if raw_pred is not None else [],
+        "lstm_prediction": raw_pred.tolist() if raw_pred is not None else [],
         "iso_flag": iso_flag,
         "pattern_label": pattern_label,
         "pattern_probabilities": pattern_probabilities,
@@ -387,18 +419,13 @@ def ensemble_predict(req: EnsembleRequest):
             "error_rate": current_error,
             "ssl_days_left": current_ssl,
         },
-        "forecast_worst": {
-            "ttfb_ms": worst_ttfb,
-            "dns_ms": float(forecast_last[dns_idx]),
-            "error_rate": float(forecast_last[err_idx]),
-            "ssl_days_left": float(forecast_last[ssl_idx]),
-        },
+        "forecast_worst": forecast_worst,
     }
 
 @app.get("/health")
 def health():
     return {
-        "status": "running",
+        "status": "ready",
         "lstm_loaded": lstm_model is not None,
         "iso_loaded": iso_model is not None,
         "log_loaded": log_classifier is not None,

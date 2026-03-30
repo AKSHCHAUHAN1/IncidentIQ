@@ -59,7 +59,7 @@ def train():
     train_loader = DataLoader(
         TensorDataset(torch.tensor(X_train, dtype=torch.float32),
                       torch.tensor(y_train_flat, dtype=torch.float32)),
-        batch_size=BATCH_SIZE, shuffle=True
+        batch_size=BATCH_SIZE, shuffle=False
     )
     val_loader = DataLoader(
         TensorDataset(torch.tensor(X_val, dtype=torch.float32),

@@ -55,7 +55,7 @@ const SiteSparkline = ({ siteId }) => {
 };
 
 // Single site card
-const SiteCard = ({ site, onRemove }) => {
+const SiteCard = ({ site, onRemove, isDeleting = false }) => {
   const [expanded, setExpanded] = useState(false);
 
   const statusColor = { up: 'border-green-500/20', degraded: 'border-amber-500/20', down: 'border-red-500/30 bg-red-500/5', unknown: 'border-white/5' };
@@ -81,9 +81,13 @@ const SiteCard = ({ site, onRemove }) => {
               {Math.round(site.last_response_ms)}ms
             </span>
           )}
-          <button onClick={e => { e.stopPropagation(); onRemove(site.id); }}
-            className="text-gray-600 hover:text-red-400 transition-colors p-1">
-            <Trash2 size={14} />
+          <button
+            type="button"
+            onClick={e => { e.stopPropagation(); onRemove(site.id); }}
+            disabled={isDeleting}
+            className={`transition-colors p-1 ${isDeleting ? 'text-gray-700 cursor-not-allowed' : 'text-gray-600 hover:text-red-400'}`}
+          >
+            {isDeleting ? <RefreshCw size={14} className="animate-spin" /> : <Trash2 size={14} />}
           </button>
         </div>
       </div>
@@ -122,6 +126,8 @@ export default function Monitor() {
   const [loading, setLoading]   = useState(true);
   const [adding, setAdding]     = useState(false);
   const [error, setError]       = useState('');
+  const [removeError, setRemoveError] = useState('');
+  const [deletingIds, setDeletingIds] = useState(new Set());
   const intervalRef             = useRef(null);
   const statusRef               = useRef(null);
 
@@ -186,8 +192,32 @@ export default function Monitor() {
   }
 
   async function handleRemove(id) {
-    await api.removeSite(id);
-    await fetchSites();
+    if (deletingIds.has(id)) return;
+
+    setRemoveError('');
+    setDeletingIds(prev => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+
+    try {
+      const d = await api.removeSite(id);
+      if (!d?.success) {
+        throw new Error(d?.error || 'Failed to remove website');
+      }
+
+      setSites(prev => prev.filter(site => site.id !== id));
+      await fetchSites();
+    } catch (err) {
+      setRemoveError(err.message || 'Failed to remove website');
+    } finally {
+      setDeletingIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   }
 
   const upCount       = sites.filter(s => s.last_status === 'up').length;
@@ -264,9 +294,10 @@ export default function Monitor() {
         </div>
       ) : (
         <div className="space-y-3">
+          {removeError && <p className="text-red-400 text-xs font-mono">{removeError}</p>}
           <AnimatePresence>
             {sites.map(site => (
-              <SiteCard key={site.id} site={site} onRemove={handleRemove} />
+              <SiteCard key={site.id} site={site} onRemove={handleRemove} isDeleting={deletingIds.has(site.id)} />
             ))}
           </AnimatePresence>
         </div>

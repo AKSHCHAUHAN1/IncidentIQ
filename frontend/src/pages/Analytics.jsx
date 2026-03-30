@@ -4,7 +4,7 @@ import {
   AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts';
-import { BarChart2, TrendingUp, Zap, Clock } from 'lucide-react';
+import { BarChart2, TrendingUp, Zap, Clock, RefreshCw } from 'lucide-react';
 import { api } from '../lib/api';
 
 const pageVariants = {
@@ -38,31 +38,33 @@ export default function Analytics() {
   const [mlHealth, setMlHealth] = useState(null);
   const [loading,  setLoading]  = useState(true);
 
-  useEffect(() => {
-    async function fetchAll() {
-      try {
-        const [s, a, svc] = await Promise.all([
-          api.summary(),
-          api.accuracyTrend(),
-          api.serviceStats(),
-        ]);
-        setSummary(s);
-        setAccuracy(a.accuracy_trend || []);
-        setServices(svc.services     || []);
+  async function fetchAll() {
+    setLoading(true);
+    try {
+      const [s, a, svc] = await Promise.all([
+        api.summary(),
+        api.accuracyTrend(),
+        api.serviceStats(),
+      ]);
+      setSummary(s);
+      setAccuracy(a.accuracy_trend || []);
+      setServices(svc.services     || []);
 
-        // ML health — proxied through api-gateway (no CORS issues)
-        try {
-          const h = await api.mlHealth();
-          setMlHealth(h);
-        } catch {
-          setMlHealth(null);
-        }
-      } catch (err) {
-        console.error('Analytics fetch failed:', err.message);
-      } finally {
-        setLoading(false);
+      // ML health — proxied through api-gateway (no CORS issues)
+      try {
+        const h = await api.mlHealth();
+        setMlHealth(h);
+      } catch {
+        setMlHealth(null);
       }
+    } catch (err) {
+      console.error('Analytics fetch failed:', err.message);
+    } finally {
+      setLoading(false);
     }
+  }
+
+  useEffect(() => {
     fetchAll();
   }, []);
 
@@ -113,7 +115,12 @@ export default function Analytics() {
     <motion.main initial="initial" animate="in" exit="out" variants={pageVariants}
       className="relative z-10 pt-32 px-10 max-w-7xl mx-auto pb-20">
 
-      <h1 className="text-3xl font-bold tracking-tighter mb-2">Analytics</h1>
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-3xl font-bold tracking-tighter">Analytics</h1>
+        <button onClick={fetchAll} className="text-gray-500 hover:text-white transition-colors">
+          <RefreshCw size={16} />
+        </button>
+      </div>
       <p className="text-gray-400 mb-10 tracking-tighter">
         Model performance, prediction accuracy, and system health.
       </p>

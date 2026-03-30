@@ -159,13 +159,23 @@ async function probe(targetUrl) {
       resolvedIp = addrs[0];
       result.dns_ms = Math.round(performance.now() - dnsStart);
     } catch (dnsErr) {
-      result.dns_ms = Math.round(performance.now() - dnsStart);
-      result.error = `DNS_FAIL: ${dnsErr.code}`;
-      trackResult(targetUrl, true);
-      return result;
+      // Fallback to dns.lookup (uses OS resolver — resolves host.docker.internal, /etc/hosts, etc.)
+      try {
+        const { address } = await dns.lookup(hostname);
+        resolvedIp = address;
+        result.dns_ms = Math.round(performance.now() - dnsStart);
+      } catch (lookupErr) {
+        result.dns_ms = Math.round(performance.now() - dnsStart);
+        result.error = `DNS_FAIL: ${lookupErr.code || lookupErr.message}`;
+        trackResult(targetUrl, true);
+        return result;
+      }
     }
 
     const sslPromise = isHttps ? getSslDaysLeft(hostname) : Promise.resolve(null);
+
+    // Use port from URL, or default to 443/80
+    const targetPort = url.port ? parseInt(url.port) : (isHttps ? 443 : 80);
 
     await new Promise((resolve, reject) => {
       const reqStart = performance.now();
@@ -176,15 +186,18 @@ async function probe(targetUrl) {
 
       const req = lib.request(
         {
-          hostname,
+          hostname: resolvedIp || hostname,
           path: url.pathname + url.search,
-          port: isHttps ? 443 : 80,
+          port: targetPort,
           method: "GET",
           headers: {
-            "User-Agent": "IncidentIQ-Probe/1.0 (performance monitoring)",
-            Accept: "*/*",
+            "User-Agent": "Mozilla/5.0 (compatible; IncidentIQ-Probe/1.0; +https://incidentiq.dev)",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            Host: hostname,
           },
           timeout: REQUEST_TIMEOUT_MS,
+          ...(isHttps ? { servername: hostname, rejectUnauthorized: false } : {}),
         },
         (res) => {
           firstByteAt = performance.now();
@@ -227,7 +240,9 @@ async function probe(targetUrl) {
 
     result.ssl_days_left = await sslPromise;
 
-    const isError = !result.status_code || result.status_code >= 400;
+    // Only count 5xx and connection failures as errors.
+    // 3xx/4xx are expected from login pages, WAFs, and bot-protection — not real downtime.
+    const isError = !result.status_code || result.status_code >= 500;
     result.error_rate = trackResult(targetUrl, isError);
 
   } catch (err) {

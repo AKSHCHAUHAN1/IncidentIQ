@@ -26,7 +26,7 @@ import time
 import argparse
 import os
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
@@ -82,6 +82,17 @@ def fetch_crux(url: str, api_key: str | None = None) -> dict | None:
     try:
         resp = requests.post(CRUX_API_URL, params=params, json=payload, timeout=15)
 
+        if resp.status_code == 403:
+            hint = ""
+            try:
+                err = resp.json().get("error", {})
+                hint = err.get("message", "")
+            except Exception:
+                hint = resp.text[:200]
+            raise PermissionError(
+                f"CrUX API returned 403 for {url}. {hint}".strip()
+            )
+
         if resp.status_code == 404:
             print(f"  [SKIP] {url} — not in CrUX dataset (not enough real user data)")
             return None
@@ -120,7 +131,7 @@ def fetch_crux(url: str, api_key: str | None = None) -> dict | None:
             # CrUX "Good" threshold for TTFB is 800ms (per Core Web Vitals spec)
             # We set anomaly threshold at 2x the P75 as a conservative signal
             "ttfb_anomaly_threshold_ms": ttfb_p75 * 2.5,
-            "fetched_at":  datetime.utcnow().isoformat(),
+            "fetched_at":  datetime.now(timezone.utc).isoformat(),
             "source":      "crux_api"
         }
 
@@ -202,9 +213,17 @@ def save_json(baselines: list[dict]):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--api-key", default=None, help="Google CrUX API key (optional)")
+    parser.add_argument("--api-key", default=None, help="Google CrUX API key (optional; defaults to GOOGLE_API_KEY env)")
     parser.add_argument("--no-db", action="store_true", help="Skip DB, save JSON only")
     args = parser.parse_args()
+
+    api_key = args.api_key or os.environ.get("GOOGLE_API_KEY") or os.environ.get("CRUX_API_KEY")
+
+    if api_key:
+        source = "--api-key" if args.api_key else ("GOOGLE_API_KEY" if os.environ.get("GOOGLE_API_KEY") else "CRUX_API_KEY")
+        print(f"Using CrUX API key from {source}")
+    else:
+        print("No CrUX API key provided; requests may be rate-limited or rejected (403).")
 
     print(f"Fetching CrUX baselines for {len(TARGETS)} URLs...\n")
 
@@ -213,7 +232,15 @@ def main():
         url = target.get("probe_url")
         if not url:
             continue
-        result = fetch_crux(url, args.api_key)
+
+        try:
+            result = fetch_crux(url, api_key)
+        except PermissionError as e:
+            print(f"  [AUTH ERROR] {e}")
+            print("  Hint: ensure Chrome UX Report API is enabled and API key restrictions allow this endpoint.")
+            print("  Stopping further CrUX requests.")
+            break
+
         if result:
             baselines.append(result)
         time.sleep(0.7)  # stay within rate limit even without key

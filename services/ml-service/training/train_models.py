@@ -61,6 +61,7 @@ def load_data(min_samples: int) -> tuple:
         FROM ml.labeled_probe_readings
         WHERE ttfb_ms IS NOT NULL
           AND dns_ms IS NOT NULL
+          AND COALESCE(label_source, 'programmatic') != 'synthetic'
         ORDER BY url, probed_at
     """)
     rows = cur.fetchall()
@@ -332,7 +333,7 @@ def train_lstm(rows: list) -> None:
     train_ds = TensorDataset(X_train_t, y_train_t)
     val_ds   = TensorDataset(X_val_t, y_val_t)
 
-    train_dl = DataLoader(train_ds, batch_size=256, shuffle=True)
+    train_dl = DataLoader(train_ds, batch_size=256, shuffle=False)
     val_dl   = DataLoader(val_ds, batch_size=256, shuffle=False)
 
     # ── Use the SAME model as inference ───────────────────────
@@ -415,6 +416,30 @@ def train_lstm(rows: list) -> None:
     }
     with open(os.path.join(MODEL_DIR, "lstm_config.json"), "w") as f:
         json.dump(config, f, indent=2)
+
+    # Save baseline.pkl and scaler.pkl for inference (main.py needs these)
+    # Compute overall mean/std from ALL training data across URLs
+    all_values = np.array([
+        [r[f] or 0.0 for f in LSTM_FEATURES]
+        for r in rows if r["ttfb_ms"] is not None and r["dns_ms"] is not None
+    ], dtype=np.float32)
+    overall_mean = all_values.mean(axis=0)
+    overall_std = all_values.std(axis=0)
+    overall_std[overall_std == 0] = 1.0
+
+    # baseline.pkl — dict with mean/std arrays
+    joblib.dump({"mean": overall_mean, "std": overall_std}, os.path.join(MODEL_DIR, "baseline.pkl"))
+    print(f"✓ Saved baseline.pkl (mean/std for {len(LSTM_FEATURES)} features)")
+
+    # scaler.pkl — StandardScaler compatible with main.py's to_zscore/from_zscore
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    scaler.mean_ = overall_mean
+    scaler.scale_ = overall_std
+    scaler.var_ = overall_std ** 2
+    scaler.n_features_in_ = len(LSTM_FEATURES)
+    joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler.pkl"))
+    print(f"✓ Saved scaler.pkl")
 
     print(f"✓ Saved to {MODEL_DIR}/lstm_best.pt")
     print(f"  Val MSE: {best_val_loss:.4f} | Val MAE: {mae:.4f}")
