@@ -12,8 +12,8 @@ router.get("/", async (req, res) => {
               lr.probed_at AS last_probed,
               lr.status_code,
               CASE
-                WHEN lr.ttfb_ms IS NULL THEN 'unknown'
-                WHEN lr.status_code = 0 OR lr.status_code IS NULL THEN 'down'
+                WHEN lr.probed_at IS NULL THEN 'unknown'
+                WHEN lr.ttfb_ms IS NULL OR lr.status_code = 0 OR lr.status_code IS NULL THEN 'down'
                 WHEN lr.status_code >= 500 OR COALESCE(lr.error_rate, 0) >= 0.5 THEN 'down'
                 WHEN lr.ttfb_ms >= 2000 THEN 'down'
                 WHEN lr.ttfb_ms >= 1000 OR COALESCE(lr.error_rate, 0) >= 0.15 THEN 'degraded'
@@ -45,8 +45,8 @@ router.get("/status", async (req, res) => {
               lr.ttfb_ms, lr.dns_ms, lr.error_rate, lr.status_code, lr.ssl_days_left,
               lr.probed_at AS last_probed,
               CASE
-                WHEN lr.ttfb_ms IS NULL THEN 'unknown'
-                WHEN lr.status_code = 0 OR lr.status_code IS NULL THEN 'down'
+                WHEN lr.probed_at IS NULL THEN 'unknown'
+                WHEN lr.ttfb_ms IS NULL OR lr.status_code = 0 OR lr.status_code IS NULL THEN 'down'
                 WHEN lr.status_code >= 500 OR COALESCE(lr.error_rate, 0) >= 0.5 THEN 'down'
                 WHEN lr.ttfb_ms >= 2000 THEN 'down'
                 WHEN lr.ttfb_ms >= 1000 OR COALESCE(lr.error_rate, 0) >= 0.15 THEN 'degraded'

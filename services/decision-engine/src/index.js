@@ -81,15 +81,25 @@ function computeConfidence(prediction, currentMetrics) {
   const error = Number(currentMetrics?.error_rate || 0);
   const breachEta = Number(prediction?.breach_eta_min || 0);
   const modelConfidence = Number(prediction?.confidence || 0);
+  const status = Number(currentMetrics?.status_code || 200);
 
-  let confidence = 0.2;
-  confidence += Math.min(ttfb / SLA_TTFB_MS, 1) * 0.35;
-  confidence += Math.min(dns / 300, 1) * 0.15;
-  confidence += Math.min(error / 20, 1) * 0.2;
-  confidence += prediction?.iso_flag === -1 ? 0.15 : 0;
-  confidence += breachEta > 0 && breachEta <= 30 ? 0.15 : 0;
+  // Metric-based confidence score
+  let metricScore = 0.15;
+  metricScore += Math.min(ttfb / SLA_TTFB_MS, 1) * 0.30;
+  metricScore += Math.min(dns / 300, 1) * 0.10;
+  metricScore += Math.min(error / 10, 1) * 0.20;
+  metricScore += prediction?.iso_flag === -1 ? 0.15 : 0;
+  metricScore += breachEta > 0 && breachEta <= 30 ? 0.15 : 0;
+  // Status code errors boost confidence significantly
+  if (status >= 500) metricScore += 0.25;
+  else if (status >= 400 || status === 0) metricScore += 0.15;
+  // High TTFB (over 50% SLA) adds urgency
+  if (ttfb > SLA_TTFB_MS * 0.5) metricScore += 0.10;
 
-  return clamp01(Math.max(confidence, modelConfidence));
+  // Blend metric score with ML model confidence (model gets 40% weight)
+  const blended = metricScore * 0.6 + modelConfidence * 0.4;
+
+  return clamp01(Math.max(blended, modelConfidence));
 }
 
 function deriveSeverity(prediction, currentMetrics, confidence) {
@@ -172,8 +182,8 @@ app.post("/evaluate", async (req, res) => {
 
     console.log(`[Decision] ${service_id} | url=${resolvedUrl} | severity=${severity} | confidence=${(confidence * 100).toFixed(1)}% | root_cause=${rootCause}`);
 
-    // ── confidence < 0.70 → log only, no DB insert ──
-    if (confidence < 0.70) {
+    // ── confidence < 0.30 → log only, no DB insert ──
+    if (confidence < 0.30) {
       console.log(`[Decision] LOW CONFIDENCE (${(confidence * 100).toFixed(1)}%) — log only`);
       return res.json({ status: "normal", confidence, severity, root_cause: rootCause, url: resolvedUrl });
     }
