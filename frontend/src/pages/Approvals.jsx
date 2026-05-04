@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ShieldAlert, CheckCircle, RefreshCw, Check, X } from 'lucide-react';
 import { socket } from '../socket';
 import { api } from '../lib/api';
+import MagicButton from '../components/MagicButton';
 
 export default function Approvals() {
   const [approvals, setApprovals]   = useState([]);
@@ -145,23 +146,25 @@ export default function Approvals() {
 
                     {/* Action bar — "Action Taken" (green) and "Ignore" (grey) */}
                     <div className="flex items-center gap-4 border-t border-white/10 pt-6">
-                      <button
+                      <MagicButton
                         onClick={() => handleIgnore(approval)}
                         disabled={isWorking}
-                        className="flex items-center gap-2 px-6 py-3 rounded-full border border-white/10 bg-white/5 text-gray-300 font-bold text-sm hover:bg-white/10 hover:text-white transition-all disabled:opacity-50"
+                        className="opacity-100 disabled:opacity-50"
+                        innerClassName="gap-2 text-gray-300 font-bold text-sm hover:text-white"
                       >
                         <X size={16} />
                         {state === 'ignoring' ? 'Ignoring...' : 'Ignore'}
-                      </button>
+                      </MagicButton>
 
-                      <button
+                      <MagicButton
                         onClick={() => handleActionTaken(approval)}
                         disabled={isWorking}
-                        className="flex items-center gap-2 px-6 py-3 rounded-full bg-green-500/20 border border-green-500/30 text-green-400 font-bold text-sm hover:bg-green-500/30 hover:text-green-300 transition-all disabled:opacity-50 ml-auto"
+                        className="ml-auto opacity-100 disabled:opacity-50"
+                        innerClassName="gap-2 text-green-400 font-bold text-sm bg-green-500/10 hover:bg-green-500/20"
                       >
                         <Check size={16} />
                         {state === 'action_taken' ? 'Processing...' : 'Action Taken'}
-                      </button>
+                      </MagicButton>
                     </div>
                   </>
                 )}

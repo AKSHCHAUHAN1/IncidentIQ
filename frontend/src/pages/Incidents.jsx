@@ -31,7 +31,7 @@ export default function Incidents() {
     socket.on('new_prediction', handleNewPrediction);
 
     // Refresh incidents periodically
-    const interval = setInterval(fetchIncidents, 60_000);
+    const interval = setInterval(fetchIncidents, 30_000);
 
     return () => {
       socket.off('new_alert', handleNewAlert);

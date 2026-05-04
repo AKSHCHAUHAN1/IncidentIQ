@@ -1,7 +1,7 @@
 /**
  * website-probe/index.js
  * ========================
- * HTTP probe service — polls all target URLs every 60 seconds
+ * HTTP probe service — polls all target URLs every 30 seconds
  * and writes real measurements to TimescaleDB.
  *
  * On startup: seeds training URLs from probe-targets.json into
@@ -354,7 +354,7 @@ async function bootstrap() {
   // Initial target refresh + first probe
   await probeAll();
 
-  // Schedule probes every 60 seconds
+  // Schedule probes every 30 seconds
   setInterval(() => probeAll().catch(console.error), PROBE_INTERVAL_MS);
 }
 

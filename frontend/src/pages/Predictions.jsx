@@ -131,10 +131,9 @@ export default function Predictions() {
   }, [filter]);
 
   const counts = {
-    all:      predictions.length,
+    all:      predictions.filter(p => p.severity !== 'normal').length,
     critical: predictions.filter(p => p.severity === 'critical').length,
     warning:  predictions.filter(p => p.severity === 'warning').length,
-    normal:   predictions.filter(p => p.severity === 'normal').length,
   };
 
   return (
@@ -156,7 +155,7 @@ export default function Predictions() {
 
       {/* Filter tabs */}
       <div className="flex gap-2 mb-8">
-        {['all', 'critical', 'warning', 'normal'].map(f => (
+        {['all', 'critical', 'warning'].map(f => (
           <button key={f} onClick={() => { setFilter(f); setLoading(true); }}
             className={`px-4 py-2 rounded-full text-xs font-mono font-bold transition-all border ${
               filter === f
@@ -170,11 +169,10 @@ export default function Predictions() {
       </div>
 
       {/* Summary stats */}
-      <div className="grid grid-cols-3 gap-4 mb-8">
+      <div className="grid grid-cols-2 gap-4 mb-8">
         {[
           { label: 'Critical', value: counts.critical, color: 'text-red-400', icon: <AlertTriangle size={14} /> },
           { label: 'Warning',  value: counts.warning,  color: 'text-amber-400', icon: <AlertTriangle size={14} /> },
-          { label: 'Normal',   value: counts.normal,   color: 'text-green-400', icon: <TrendingUp size={14} /> },
         ].map((s, i) => (
           <div key={i} className="replica-3d-item p-4 flex items-center gap-3">
             <span className={s.color}>{s.icon}</span>

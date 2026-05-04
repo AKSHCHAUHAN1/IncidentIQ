@@ -26,7 +26,13 @@ router.get("/", async (req, res) => {
     let i = 1;
 
     if (service_id) { conditions.push(`p.service_id = $${i++}`); params.push(service_id); }
-    if (severity)   { conditions.push(`p.severity = $${i++}`);   params.push(severity);   }
+    if (severity)   { 
+      conditions.push(`p.severity = $${i++}`); 
+      params.push(severity); 
+    } else {
+      // By default, hide 'normal' unless specifically requested
+      conditions.push(`p.severity != 'normal'`);
+    }
 
     const where = `WHERE ${conditions.join(" AND ")}`;
     params.push(parseInt(limit), parseInt(offset));
