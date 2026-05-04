@@ -10,7 +10,7 @@ export function initWebSocket(httpServer) {
     socket.on("disconnect", () => console.log("WS disconnected:", socket.id));
   });
 
-  // Emit metrics_update every 60 seconds
+  // Emit metrics_update every 15 seconds
   setInterval(async () => {
     try {
       const counts = await computeMetricsCounts();
@@ -19,7 +19,7 @@ export function initWebSocket(httpServer) {
     } catch (err) {
       console.error("[WS] metrics_update error:", err.message);
     }
-  }, 60_000);
+  }, 15_000);
 
   console.log("WebSocket server ready");
   return io;

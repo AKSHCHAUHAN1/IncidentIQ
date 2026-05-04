@@ -27,6 +27,7 @@ export default function Approvals() {
     setProcessing(p => ({ ...p, [approval.id]: 'action_taken' }));
     try {
       await api.patchApproval(approval.id, 'action_taken');
+      window.dispatchEvent(new Event('approval_actioned'));
       setProcessing(p => ({ ...p, [approval.id]: 'done' }));
       setTimeout(() => {
         setApprovals(prev => prev.filter(a => a.id !== approval.id));
@@ -42,6 +43,7 @@ export default function Approvals() {
     setProcessing(p => ({ ...p, [approval.id]: 'ignoring' }));
     try {
       await api.patchApproval(approval.id, 'ignored');
+      window.dispatchEvent(new Event('approval_actioned'));
       setApprovals(prev => prev.filter(a => a.id !== approval.id));
       setProcessing(p => { const n = { ...p }; delete n[approval.id]; return n; });
     } catch (err) {

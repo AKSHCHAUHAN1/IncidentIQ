@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Plus, Trash2, Globe, RefreshCw, AlertTriangle, CheckCircle, Clock, Wifi, WifiOff, Shield } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
@@ -21,16 +21,16 @@ const StatusBadge = ({ status }) => {
   );
 };
 
-// Sparkline for a single site
-const SiteSparkline = ({ siteId }) => {
+// Sparkline for a single site — auto-refreshes
+const SiteSparkline = ({ siteId, refreshKey }) => {
   const [data, setData] = useState([]);
 
-  useEffect(() => {
-    api.siteMetrics(siteId, 20)
+  const fetchData = useCallback(() => {
+    api.siteMetrics(siteId, 30)
       .then(d => {
         if (d.metrics?.length) {
           setData(d.metrics.map(m => ({
-            time: new Date(m.time).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' }),
+            time: new Date(m.time).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
             rt:   Math.round(m.response_time_ms || m.response_time || m.ttfb_ms || m.latency || 0),
           })));
         }
@@ -38,12 +38,22 @@ const SiteSparkline = ({ siteId }) => {
       .catch(() => {});
   }, [siteId]);
 
+  useEffect(() => {
+    fetchData();
+  }, [fetchData, refreshKey]);
+
+  // Auto-refresh sparkline every 30s
+  useEffect(() => {
+    const interval = setInterval(fetchData, 30_000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
   if (data.length < 2) return <div className="h-12 flex items-center text-gray-600 text-xs font-mono">Collecting data...</div>;
 
   return (
     <ResponsiveContainer width="100%" height={48}>
       <LineChart data={data}>
-        <Line type="monotone" dataKey="rt" stroke="#6366f1" strokeWidth={1.5} dot={false} />
+        <Line type="monotone" dataKey="rt" stroke="#6366f1" strokeWidth={1.5} dot={false} isAnimationActive={false} />
         <Tooltip
           contentStyle={{ background: 'rgba(10,12,16,0.95)', border: '1px solid rgba(255,255,255,0.1)', fontSize: 10 }}
           formatter={v => [`${v}ms`, 'Response']}
@@ -55,7 +65,7 @@ const SiteSparkline = ({ siteId }) => {
 };
 
 // Single site card
-const SiteCard = ({ site, onRemove, isDeleting = false }) => {
+const SiteCard = ({ site, onRemove, isDeleting = false, refreshKey }) => {
   const [expanded, setExpanded] = useState(false);
 
   const statusColor = { up: 'border-green-500/20', degraded: 'border-amber-500/20', down: 'border-red-500/30 bg-red-500/5', unknown: 'border-white/5' };
@@ -110,8 +120,8 @@ const SiteCard = ({ site, onRemove, isDeleting = false }) => {
                 </p>
               </div>
             </div>
-            <p className="text-xs text-gray-500 font-mono mb-2">Response time (last 10 min)</p>
-            <SiteSparkline siteId={site.id} />
+            <p className="text-xs text-gray-500 font-mono mb-2">Response time (last 30 min)</p>
+            <SiteSparkline siteId={site.id} refreshKey={refreshKey} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -128,6 +138,7 @@ export default function Monitor() {
   const [error, setError]       = useState('');
   const [removeError, setRemoveError] = useState('');
   const [deletingIds, setDeletingIds] = useState(new Set());
+  const [refreshKey, setRefreshKey]   = useState(0);
   const intervalRef             = useRef(null);
   const statusRef               = useRef(null);
 
@@ -140,7 +151,7 @@ export default function Monitor() {
   }
 
   // Poll status for live updates between probe cycles
-  async function pollStatus() {
+  const pollStatus = useCallback(async () => {
     try {
       const d = await api.sitesStatus();
       if (d.sites?.length) {
@@ -159,20 +170,37 @@ export default function Monitor() {
             return site;
           });
         });
+        // Bump refreshKey so expanded sparklines re-fetch
+        setRefreshKey(k => k + 1);
       }
     } catch (err) { console.error('[Monitor] status poll error:', err); }
-  }
+  }, []);
 
   useEffect(() => {
     fetchSites();
-    intervalRef.current = setInterval(fetchSites, 60_000); // full refresh every probe cycle
-    statusRef.current = setInterval(pollStatus, 30_000);    // status poll every 30s
+    intervalRef.current = setInterval(fetchSites, 30_000); // full refresh every probe cycle
+    statusRef.current = setInterval(pollStatus, 15_000);    // status poll every 15s
+
+    // Listen for real-time probe updates via socket
+    const handleMetricsUpdate = () => {
+      pollStatus();
+    };
+    const handleNewPrediction = () => {
+      pollStatus();
+    };
+
+    socket.on('metrics_update', handleMetricsUpdate);
+    socket.on('new_prediction', handleNewPrediction);
+    socket.on('probe_complete', handleMetricsUpdate);
 
     return () => {
       clearInterval(intervalRef.current);
       clearInterval(statusRef.current);
+      socket.off('metrics_update', handleMetricsUpdate);
+      socket.off('new_prediction', handleNewPrediction);
+      socket.off('probe_complete', handleMetricsUpdate);
     };
-  }, []);
+  }, [pollStatus]);
 
   async function handleAdd(e) {
     e.preventDefault();
@@ -230,12 +258,12 @@ export default function Monitor() {
 
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-3xl font-bold tracking-tighter">Website Monitor</h1>
-        <button onClick={fetchSites} className="text-gray-500 hover:text-white transition-colors">
+        <button onClick={() => { fetchSites(); pollStatus(); }} className="text-gray-500 hover:text-white transition-colors">
           <RefreshCw size={16} />
         </button>
       </div>
       <p className="text-gray-400 mb-10 tracking-tighter">
-        Add any URL — IncidentIQ probes it every 60s and predicts SLA risk before downtime.
+        Add any URL — IncidentIQ probes it every 30s and predicts SLA risk before downtime.
       </p>
 
       {/* URL input */}
@@ -290,14 +318,14 @@ export default function Monitor() {
         <div className="tech-border bg-black/40 rounded-2xl p-16 flex flex-col items-center gap-4 text-center">
           <Globe size={32} className="text-gray-600" />
           <p className="text-gray-400 font-mono">No sites monitored yet.</p>
-          <p className="text-gray-600 text-sm">Paste any URL above — the first probe runs within 60 seconds.</p>
+          <p className="text-gray-600 text-sm">Paste any URL above — the first probe runs within 30 seconds.</p>
         </div>
       ) : (
         <div className="space-y-3">
           {removeError && <p className="text-red-400 text-xs font-mono">{removeError}</p>}
           <AnimatePresence>
             {sites.map(site => (
-              <SiteCard key={site.id} site={site} onRemove={handleRemove} isDeleting={deletingIds.has(site.id)} />
+              <SiteCard key={site.id} site={site} onRemove={handleRemove} isDeleting={deletingIds.has(site.id)} refreshKey={refreshKey} />
             ))}
           </AnimatePresence>
         </div>
@@ -311,7 +339,7 @@ export default function Monitor() {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 font-mono text-xs text-gray-500">
           {[
-            ["1. Probe",     "IncidentIQ hits your URL every 60s, measuring TTFB, DNS, SSL days, and availability"],
+            ["1. Probe",     "IncidentIQ hits your URL every 30s, measuring TTFB, DNS, SSL days, and availability"],
             ["2. Ingest",    "Raw metrics flow into TimescaleDB via Redis stream — same pipeline as internal services"],
             ["3. Predict",   "LSTM forecasts the next 30 minutes. Isolation Forest flags anomalous performance shifts"],
             ["4. Alert", "When confidence is high, IncidentIQ generates a structured incident report and alert"],

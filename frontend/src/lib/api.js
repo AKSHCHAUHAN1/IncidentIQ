@@ -67,10 +67,8 @@ async function call(path, opts = {}) {
 }
 
 export const api = {
-  // Analytics
+  // Summary
   summary:       ()            => call('/api/analytics/summary'),
-  accuracyTrend: ()            => call('/api/analytics/accuracy'),
-  serviceStats:  ()            => call('/api/analytics/services'),
 
   // ML service health (proxied through api-gateway to avoid CORS)
   mlHealth:      ()            => call('/api/ml/health'),
@@ -84,6 +82,10 @@ export const api = {
   // Incidents
   incidents:     (params)      => call('/api/incidents?' + new URLSearchParams(params)),
   incidentById:  (id)          => call(`/api/incidents/${id}`),
+  patchIncident: (id, status)  => call(`/api/incidents/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  }),
 
   // Approvals — new Action Taken / Ignore workflow
   approvals:     ()            => call('/api/approvals'),

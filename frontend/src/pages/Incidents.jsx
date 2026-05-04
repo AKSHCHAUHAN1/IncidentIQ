@@ -1,13 +1,15 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, X, Loader, CheckCircle2, XCircle, MinusCircle, RefreshCw } from 'lucide-react';
+import { Search, X, Loader, CheckCircle2, XCircle, MinusCircle, RefreshCw, Check } from 'lucide-react';
 import { api } from '../lib/api';
+import { socket } from '../socket';
 
 export default function Incidents() {
   const [searchTerm, setSearchTerm]               = useState('');
   const [selectedIncident, setSelectedIncident]   = useState(null);
   const [incidents, setIncidents]                 = useState([]);
   const [loading, setLoading]                     = useState(true);
+  const [processing, setProcessing]               = useState({}); // id → 'action_taken'|'ignoring'|'done'
 
   async function fetchIncidents() {
     setLoading(true);
@@ -20,7 +22,31 @@ export default function Incidents() {
 
   useEffect(() => {
     fetchIncidents();
+
+    // Listen for new incidents and alerts via socket
+    const handleNewAlert = () => fetchIncidents();
+    const handleNewPrediction = () => fetchIncidents();
+
+    socket.on('new_alert', handleNewAlert);
+    socket.on('new_prediction', handleNewPrediction);
+
+    // Refresh incidents periodically
+    const interval = setInterval(fetchIncidents, 60_000);
+
+    return () => {
+      socket.off('new_alert', handleNewAlert);
+      socket.off('new_prediction', handleNewPrediction);
+      clearInterval(interval);
+    };
   }, []);
+
+  // Keep selected incident in sync with list updates
+  useEffect(() => {
+    if (selectedIncident) {
+      const updated = incidents.find(i => i.id === selectedIncident.id);
+      if (updated) setSelectedIncident(updated);
+    }
+  }, [incidents]);
 
   const filteredIncidents = useMemo(() =>
     incidents.filter(inc =>
@@ -34,6 +60,45 @@ export default function Incidents() {
     if (inc.status === 'ignored') return 'Ignored';
     return 'Open';
   };
+
+  async function handleActionTaken(incident) {
+    setProcessing(p => ({ ...p, [incident.id]: 'action_taken' }));
+    try {
+      await api.patchIncident(incident.id, 'action_taken');
+      setProcessing(p => ({ ...p, [incident.id]: 'done' }));
+      // Update in list
+      setIncidents(prev => prev.map(i =>
+        i.id === incident.id ? { ...i, status: 'action_taken' } : i
+      ));
+      if (selectedIncident?.id === incident.id) {
+        setSelectedIncident(prev => ({ ...prev, status: 'action_taken' }));
+      }
+      setTimeout(() => {
+        setProcessing(p => { const n = { ...p }; delete n[incident.id]; return n; });
+      }, 1500);
+    } catch (err) {
+      console.error('Action taken failed:', err.message);
+      setProcessing(p => ({ ...p, [incident.id]: null }));
+    }
+  }
+
+  async function handleIgnore(incident) {
+    setProcessing(p => ({ ...p, [incident.id]: 'ignoring' }));
+    try {
+      await api.patchIncident(incident.id, 'ignored');
+      // Update in list
+      setIncidents(prev => prev.map(i =>
+        i.id === incident.id ? { ...i, status: 'ignored' } : i
+      ));
+      if (selectedIncident?.id === incident.id) {
+        setSelectedIncident(prev => ({ ...prev, status: 'ignored' }));
+      }
+      setProcessing(p => { const n = { ...p }; delete n[incident.id]; return n; });
+    } catch (err) {
+      console.error('Ignore failed:', err.message);
+      setProcessing(p => ({ ...p, [incident.id]: null }));
+    }
+  }
 
   const StatusPill = ({ status }) => {
     if (status === 'Open') return (
@@ -183,6 +248,50 @@ export default function Incidents() {
                   </div>
                 </div>
               )}
+
+              {/* Action buttons — only for 'open' incidents */}
+              {selectedIncident.status === 'open' && (() => {
+                const state     = processing[selectedIncident.id];
+                const isDone    = state === 'done';
+                const isWorking = state === 'action_taken' || state === 'ignoring';
+
+                if (isDone) {
+                  return (
+                    <div className="flex flex-col items-center py-6 gap-3 border-t border-white/10">
+                      <CheckCircle2 className="text-green-500 w-10 h-10 animate-pulse drop-shadow-[0_0_15px_rgba(34,197,94,0.5)]" />
+                      <p className="text-green-400 font-bold tracking-tighter">Acknowledged</p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="flex items-center gap-3 pt-6 border-t border-white/10">
+                    <button
+                      onClick={() => handleIgnore(selectedIncident)}
+                      disabled={isWorking}
+                      className="metal-container group disabled:opacity-50 flex-1"
+                      style={{ '--m-radius': '0.75rem', '--m-border': '1px' }}
+                    >
+                      <div className="metal-surface px-5 py-3 flex items-center justify-center gap-2 font-bold text-sm text-gray-300 transition-colors group-hover:bg-[#151515] group-hover:text-white">
+                        <X size={14} />
+                        {state === 'ignoring' ? 'Ignoring...' : 'Ignore'}
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => handleActionTaken(selectedIncident)}
+                      disabled={isWorking}
+                      className="metal-container group disabled:opacity-50 flex-1"
+                      style={{ '--m-radius': '0.75rem', '--m-border': '1px' }}
+                    >
+                      <div className="metal-surface px-5 py-3 flex items-center justify-center gap-2 font-bold text-sm text-green-400 transition-colors group-hover:bg-[#151515] group-hover:text-green-300">
+                        <Check size={14} />
+                        {state === 'action_taken' ? 'Processing...' : 'Action Taken'}
+                      </div>
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
           </motion.div>
         )}

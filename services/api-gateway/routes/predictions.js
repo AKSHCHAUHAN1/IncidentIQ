@@ -8,7 +8,19 @@ router.get("/", async (req, res) => {
   try {
     const { service_id, severity, limit = 50, offset = 0 } = req.query;
     let conditions = [
-      `p.url IN (SELECT url FROM public.monitored_sites WHERE is_training_only = FALSE AND is_active = TRUE)`
+      `(
+        p.url IN (SELECT url FROM public.monitored_sites WHERE is_training_only = FALSE AND is_active = TRUE)
+        OR p.service_id IN (
+          SELECT DISTINCT
+            CASE
+              WHEN position('://' IN ms.url) > 0
+                THEN split_part(split_part(ms.url, '://', 2), '/', 1)
+              ELSE split_part(ms.url, '/', 1)
+            END
+          FROM public.monitored_sites ms
+          WHERE ms.is_training_only = FALSE AND ms.is_active = TRUE
+        )
+      )`
     ];
     let params = [];
     let i = 1;

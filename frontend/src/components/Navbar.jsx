@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, GitBranch, History, ShieldAlert, BarChart2, Globe } from 'lucide-react';
+import { Activity, GitBranch, ShieldAlert, Globe } from 'lucide-react';
 import { socket } from '../socket';
 import { api } from '../lib/api';
 
@@ -25,9 +25,14 @@ export default function Navbar() {
     // new_alert doesn't affect approvals badge but refresh to be safe
     socket.on('new_alert', refreshCount);
 
-    const t = setInterval(refreshCount, 30_000);
+    // Immediately refresh when an approval is actioned from Approvals/Incidents page
+    const onApprovalActioned = () => refreshCount();
+    window.addEventListener('approval_actioned', onApprovalActioned);
+
+    const t = setInterval(refreshCount, 10_000);
     return () => {
       window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('approval_actioned', onApprovalActioned);
       socket.off('new_prediction');
       socket.off('new_alert');
       clearInterval(t);
@@ -72,9 +77,9 @@ export default function Navbar() {
               <NavItem icon={<Activity size={16}/>}    label="Dashboard"   path="/" />
               <NavItem icon={<Globe size={16}/>}       label="Monitor"     path="/monitor" />
               <NavItem icon={<GitBranch size={16}/>}   label="Predictions" path="/predictions" />
-              <NavItem icon={<History size={16}/>}     label="Incidents"   path="/incidents" />
+
               <NavItem icon={<ShieldAlert size={16}/>} label="Alerts"      path="/alerts" badge={pendingApprovals} isCritical />
-              <NavItem icon={<BarChart2 size={16}/>}   label="Analytics"   path="/analytics" />
+
             </div>
           </div>
         </motion.nav>

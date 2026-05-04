@@ -7,9 +7,9 @@ import ParticleGlobe from './components/ParticleGlobe';
 const Dashboard   = lazy(() => import('./pages/Dashboard'));
 const Monitor     = lazy(() => import('./pages/Monitor'));
 const Predictions = lazy(() => import('./pages/Predictions'));
-const Incidents   = lazy(() => import('./pages/Incidents'));
+
 const Approvals   = lazy(() => import('./pages/Approvals'));
-const Analytics   = lazy(() => import('./pages/Analytics'));
+
 
 function AnimatedRoutes() {
   const location = useLocation();
@@ -20,10 +20,10 @@ function AnimatedRoutes() {
           <Route path="/"            element={<Dashboard />}   />
           <Route path="/monitor"     element={<Monitor />}     />
           <Route path="/predictions" element={<Predictions />} />
-          <Route path="/incidents"   element={<Incidents />}   />
+
           <Route path="/alerts"      element={<Approvals />}   />
           <Route path="/approvals"   element={<Navigate to="/alerts" replace />} />
-          <Route path="/analytics"   element={<Analytics />}   />
+
         </Routes>
       </Suspense>
     </AnimatePresence>

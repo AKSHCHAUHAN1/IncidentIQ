@@ -3,27 +3,64 @@ import { pool } from "../db.js";
 
 const router = Router();
 
+/**
+ * Helper: builds a WHERE clause fragment to filter incidents (which only have service_id, not url)
+ * by matching against the hostname of user-monitored sites.
+ */
+const incidentUserFilter = `i.service_id IN (
+  SELECT DISTINCT
+    CASE
+      WHEN position('://' IN ms.url) > 0
+        THEN regexp_replace(split_part(split_part(ms.url, '://', 2), '/', 1), '^www\\.', '')
+      ELSE regexp_replace(split_part(ms.url, '/', 1), '^www\\.', '')
+    END
+  FROM public.monitored_sites ms
+  WHERE ms.is_training_only = FALSE AND ms.is_active = TRUE
+  UNION
+  SELECT DISTINCT
+    CASE
+      WHEN position('://' IN ms.url) > 0
+        THEN split_part(split_part(ms.url, '://', 2), '/', 1)
+      ELSE split_part(ms.url, '/', 1)
+    END
+  FROM public.monitored_sites ms
+  WHERE ms.is_training_only = FALSE AND ms.is_active = TRUE
+)`;
+
+const predictionUserFilter = `(
+  p.url IN (SELECT url FROM public.monitored_sites WHERE is_training_only = FALSE AND is_active = TRUE)
+  OR p.service_id IN (
+    SELECT DISTINCT
+      CASE
+        WHEN position('://' IN ms.url) > 0
+          THEN split_part(split_part(ms.url, '://', 2), '/', 1)
+        ELSE split_part(ms.url, '/', 1)
+      END
+    FROM public.monitored_sites ms
+    WHERE ms.is_training_only = FALSE AND ms.is_active = TRUE
+  )
+)`;
+
 router.get("/summary", async (req, res) => {
   try {
     const slaThreshold = parseFloat(process.env.SLA_TTFB_MS || "2000");
 
-    // All queries filter to user-added sites only
-    const userSiteFilter = `url IN (SELECT url FROM public.monitored_sites WHERE is_training_only = FALSE AND is_active = TRUE)`;
+    const probeUserFilter = `url IN (SELECT url FROM public.monitored_sites WHERE is_training_only = FALSE AND is_active = TRUE)`;
 
     const [p, i, m, siteStatus] = await Promise.all([
       pool.query(`SELECT COUNT(*) as total,
         AVG(confidence) as avg_confidence,
         COUNT(*) FILTER (WHERE outcome IN ('true_positive','prevented','pending')) as correct,
         COUNT(*) FILTER (WHERE created_at > NOW()-INTERVAL '24 hours') as last_24h
-        FROM ml.predictions WHERE ${userSiteFilter}`),
+        FROM ml.predictions p WHERE ${predictionUserFilter}`),
       pool.query(`SELECT COUNT(*) as total,
         COUNT(*) FILTER (WHERE status='open') as open,
         COUNT(*) FILTER (WHERE status='action_taken') as action_taken,
         COUNT(*) FILTER (WHERE status='ignored') as ignored,
         COUNT(*) FILTER (WHERE severity='critical') as critical
-        FROM incidents.incidents WHERE ${userSiteFilter}`),
+        FROM incidents.incidents i WHERE ${incidentUserFilter}`),
       pool.query(`SELECT AVG(EXTRACT(EPOCH FROM (resolved_at-predicted_at))/60) as avg_mttr
-        FROM incidents.incidents WHERE resolved_at IS NOT NULL AND ${userSiteFilter}`),
+        FROM incidents.incidents i WHERE resolved_at IS NOT NULL AND ${incidentUserFilter}`),
       pool.query(`
         WITH latest AS (
           SELECT DISTINCT ON (pr.url) pr.url, pr.ttfb_ms, pr.error_rate, pr.status_code
@@ -47,7 +84,7 @@ router.get("/summary", async (req, res) => {
            COUNT(*) AS total,
            COUNT(*) FILTER (WHERE ttfb_ms > $1) AS breaches
          FROM metrics.probe_readings
-         WHERE probed_at > NOW() - INTERVAL '24 hours' AND ${userSiteFilter}`,
+         WHERE probed_at > NOW() - INTERVAL '24 hours' AND ${probeUserFilter}`,
         [slaThreshold]
       );
     } else {
@@ -119,9 +156,9 @@ router.get("/accuracy", async (req, res) => {
     const r = await pool.query(`
       SELECT DATE_TRUNC('day', created_at) as day, COUNT(*) as total,
         COUNT(*) FILTER (WHERE outcome IN ('true_positive','prevented')) as correct
-      FROM ml.predictions
+      FROM ml.predictions p
       WHERE created_at > NOW()-INTERVAL '30 days'
-        AND url IN (SELECT url FROM public.monitored_sites WHERE is_training_only = FALSE)
+        AND ${predictionUserFilter}
       GROUP BY day ORDER BY day ASC`);
     res.json({ success: true, accuracy_trend: r.rows.map(row => ({
       date: row.day, total: +row.total, correct: +row.correct,
@@ -139,8 +176,8 @@ router.get("/services", async (req, res) => {
       SELECT service_id, COUNT(*) as total_incidents,
         COUNT(*) FILTER (WHERE severity='critical') as critical,
         COUNT(*) FILTER (WHERE status='action_taken') as action_taken
-      FROM incidents.incidents
-      WHERE url IN (SELECT url FROM public.monitored_sites WHERE is_training_only = FALSE)
+      FROM incidents.incidents i
+      WHERE ${incidentUserFilter}
       GROUP BY service_id ORDER BY total_incidents DESC`);
     res.json({ success: true, services: r.rows });
   } catch (err) {

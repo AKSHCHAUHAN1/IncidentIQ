@@ -43,7 +43,7 @@ services:
       DB_NAME:            incident_predictor
       DATABASE_URL:       postgresql://postgres:postgres@postgres:5432/incident_predictor
       REDIS_HOST:         redis
-      PROBE_INTERVAL_MS:  60000
+      PROBE_INTERVAL_MS:  30000
       REQUEST_TIMEOUT_MS: 15000
     extra_hosts:
       - "host.docker.internal:host-gateway"

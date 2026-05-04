@@ -26,7 +26,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const TARGETS_FILE = join(__dirname, "probe-targets.json");
 const SEED_TARGETS = JSON.parse(readFileSync(TARGETS_FILE)).targets;
 
-const PROBE_INTERVAL_MS = 60_000;
+const PROBE_INTERVAL_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const ERROR_RATE_WINDOW_MIN = 5;
 
