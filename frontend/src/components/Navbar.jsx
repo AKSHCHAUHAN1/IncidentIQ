@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, GitBranch, ShieldAlert, Globe } from 'lucide-react';
+import { Activity, GitBranch, ShieldAlert, Globe, FileWarning } from 'lucide-react';
 import { socket } from '../socket';
 import { api } from '../lib/api';
 
@@ -20,8 +20,12 @@ export default function Navbar() {
     const onScroll = () => setScrolled(window.scrollY > 20);
     window.addEventListener('scroll', onScroll);
 
-    // new_prediction may add to the approval queue
-    socket.on('new_prediction', () => setPendingApprovals(p => p + 1));
+    // new_prediction may add to the approval queue (only 70-89% confidence)
+    socket.on('new_prediction', (data) => {
+      if (data?.confidence >= 0.70 && data?.confidence < 0.90) {
+        setPendingApprovals(p => p + 1);
+      }
+    });
     // new_alert doesn't affect approvals badge but refresh to be safe
     socket.on('new_alert', refreshCount);
 
@@ -79,6 +83,7 @@ export default function Navbar() {
               <NavItem icon={<GitBranch size={16}/>}   label="Predictions" path="/predictions" />
 
               <NavItem icon={<ShieldAlert size={16}/>} label="Alerts"      path="/alerts" badge={pendingApprovals} isCritical />
+              <NavItem icon={<FileWarning size={16}/>}  label="Incidents"   path="/incidents" />
 
             </div>
           </div>

@@ -70,12 +70,23 @@ SELECT add_retention_policy(
     if_not_exists => TRUE
 );
 
--- Compression after 7 days
-SELECT add_compression_policy(
-    'metrics.probe_readings',
-    INTERVAL '7 days',
-    if_not_exists => TRUE
-);
+-- Enable columnstore (compression) then add policy
+-- TimescaleDB 2.17+ renamed compression → columnstore
+DO $$
+BEGIN
+  -- Try new API first (columnstore), fall back to legacy (compression)
+  BEGIN
+    ALTER TABLE metrics.probe_readings SET (timescaledb.enable_columnstore = true);
+    PERFORM add_columnstore_policy('metrics.probe_readings', INTERVAL '7 days', if_not_exists => TRUE);
+  EXCEPTION WHEN OTHERS THEN
+    BEGIN
+      ALTER TABLE metrics.probe_readings SET (timescaledb.compress);
+      PERFORM add_compression_policy('metrics.probe_readings', INTERVAL '7 days', if_not_exists => TRUE);
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'Compression/columnstore setup skipped: %', SQLERRM;
+    END;
+  END;
+END $$;
 
 -- Indexes for common query patterns
 CREATE INDEX IF NOT EXISTS idx_probe_url_time
@@ -197,17 +208,8 @@ CREATE INDEX IF NOT EXISTS idx_predictions_severity ON ml.predictions (severity)
 -- INCIDENTS SCHEMA
 -- ============================================================
 
--- Monitored sites (user-added URLs via the Monitor page)
-CREATE TABLE IF NOT EXISTS incidents.monitored_sites (
-    id          TEXT PRIMARY KEY,
-    url         TEXT UNIQUE NOT NULL,
-    name        TEXT,
-    active      BOOLEAN DEFAULT TRUE,
-    last_status TEXT DEFAULT 'unknown',
-    last_response_ms FLOAT,
-    last_probed TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
-);
+-- NOTE: incidents.monitored_sites was removed. Use public.monitored_sites instead.
+-- (Legacy table was dropped in schema_v4.sql; keeping one canonical site registry.)
 
 -- Incidents detected by the decision engine
 CREATE TABLE IF NOT EXISTS incidents.incidents (

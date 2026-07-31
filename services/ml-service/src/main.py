@@ -173,7 +173,7 @@ def _run_lstm(arr: np.ndarray) -> np.ndarray:
 def _root_cause_rule(ttfb_ms: float, dns_ms: float, error_rate: float, ssl_days_left: float, status_code: float = 200.0) -> str:
     if ssl_days_left < 14:
         return "ssl_expiry_warning"
-    if status_code >= 500 or error_rate >= 10:
+    if status_code >= 500 or error_rate >= 0.10:
         return "error_spike"
     ratio = ttfb_ms / max(dns_ms, 1.0)
     if dns_ms >= 250 and ratio <= 3.5:
@@ -366,11 +366,11 @@ def ensemble_predict(req: EnsembleRequest):
     # ── Severity ─────────────────────────────────────────────
     if breach_eta is not None and breach_eta <= 10:
         severity = "critical"
-    elif current_ttfb >= SLA_TTFB_MS or current_error >= 15 or iso_flag == -1:
+    elif current_ttfb >= SLA_TTFB_MS or current_error >= 0.15 or iso_flag == -1:
         severity = "critical"
     elif breach_eta is not None and breach_eta <= 30:
         severity = "warning"
-    elif current_ttfb >= SLA_TTFB_MS * 0.7 or current_dns >= 200 or current_error >= 5:
+    elif current_ttfb >= SLA_TTFB_MS * 0.7 or current_dns >= 200 or current_error >= 0.05:
         severity = "warning"
     else:
         severity = "normal"
@@ -479,9 +479,9 @@ def model_info():
     """Return model metadata: version, files, and status."""
     info = {"models": {}}
     model_files = {
-        "lstm": "model.pt",
+        "lstm": "lstm_best.pt",
         "isolation_forest": "isolation_forest.pkl",
-        "pattern_classifier": "pattern_classifier.pkl",
+        "pattern_classifier": "tfidf_lr_pipeline.pkl",
         "scaler": "scaler.pkl",
         "baseline": "baseline.pkl",
     }

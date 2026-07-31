@@ -4,7 +4,8 @@ import { pool } from "./db.js";
 let io;
 
 export function initWebSocket(httpServer) {
-  io = new Server(httpServer, { cors: { origin: "*" } });
+  const allowedOrigins = (process.env.FRONTEND_ORIGIN || "http://localhost:5173").split(",");
+  io = new Server(httpServer, { cors: { origin: allowedOrigins, credentials: true } });
   io.on("connection", (socket) => {
     console.log("WS client connected:", socket.id);
     socket.on("disconnect", () => console.log("WS disconnected:", socket.id));
@@ -15,7 +16,6 @@ export function initWebSocket(httpServer) {
     try {
       const counts = await computeMetricsCounts();
       io.emit("metrics_update", counts);
-      console.log("[WS] metrics_update emitted:", counts);
     } catch (err) {
       console.error("[WS] metrics_update error:", err.message);
     }

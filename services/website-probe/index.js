@@ -70,12 +70,18 @@ async function refreshTargetsFromDB() {
        FROM public.monitored_sites
        WHERE is_active = TRUE`
     );
-    activeTargets = result.rows.map(row => ({
-      id: row.id,
-      probe_url: row.url,
-      name: row.name || new URL(row.url).hostname,
-      is_training_only: row.is_training_only,
-    }));
+    activeTargets = result.rows.map(row => {
+      let name = row.name;
+      if (!name) {
+        try { name = new URL(row.url).hostname; } catch { name = row.url; }
+      }
+      return {
+        id: row.id,
+        probe_url: row.url,
+        name,
+        is_training_only: row.is_training_only,
+      };
+    });
     console.log(`[TARGETS] Refreshed: ${activeTargets.length} active targets (${activeTargets.filter(t => !t.is_training_only).length} user, ${activeTargets.filter(t => t.is_training_only).length} training)`);
   } catch (err) {
     console.error(`[TARGETS ERROR] Failed to refresh from DB: ${err.message}`);
@@ -363,5 +369,13 @@ bootstrap().catch(console.error);
 process.on("SIGTERM", async () => {
   console.log("Shutting down...");
   await pool.end();
+  await redisClient.quit();
+  process.exit(0);
+});
+
+process.on("SIGINT", async () => {
+  console.log("Shutting down (SIGINT)...");
+  await pool.end();
+  await redisClient.quit();
   process.exit(0);
 });

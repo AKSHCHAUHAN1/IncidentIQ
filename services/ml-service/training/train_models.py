@@ -199,7 +199,7 @@ def train_tfidf_lr(rows: list) -> None:
         ("tfidf", TfidfVectorizer(
             analyzer="word",
             ngram_range=(1, 2),  # unigrams + bigrams catch patterns like "dns_z_critical origin_z_normal"
-            min_df=5,
+            min_df=2,
             max_features=500,
         )),
         ("lr", LogisticRegression(
@@ -292,9 +292,14 @@ def train_lstm(rows: list) -> None:
         return
 
     # Import the SAME model architecture used by inference
-    import sys as _sys
-    _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-    from model import LSTMModel
+    # (model.py lives in ../src/ — use importlib to avoid sys.path hacks
+    #  that confuse static analyzers like Pyrefly)
+    import importlib.util
+    _model_path = os.path.join(os.path.dirname(__file__), "..", "src", "model.py")
+    _spec = importlib.util.spec_from_file_location("model", _model_path)
+    _model_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_model_mod)
+    LSTMModel = _model_mod.LSTMModel
 
     print("\n── Training LSTM ──")
 
@@ -388,7 +393,7 @@ def train_lstm(rows: list) -> None:
                 break
 
     # Compute MAE on validation set
-    model.load_state_dict(torch.load(os.path.join(MODEL_DIR, "lstm_best.pt")))
+    model.load_state_dict(torch.load(os.path.join(MODEL_DIR, "lstm_best.pt"), weights_only=True))
     model.eval()
     all_preds, all_true = [], []
     with torch.no_grad():

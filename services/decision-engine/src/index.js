@@ -16,7 +16,12 @@ const pool = new Pool({
   user:     process.env.DB_USER     || "postgres",
   password: process.env.DB_PASSWORD || "postgres",
   database: process.env.DB_NAME     || "incident_predictor",
+  max:                 20,
+  idleTimeoutMillis:   30000,
+  connectionTimeoutMillis: 5000,
 });
+
+pool.on("error", (err) => console.error("[Decision] DB pool error:", err.message));
 
 // ── Notify API Gateway (fires WebSocket event to frontend) ────
 async function notify(type, data) {
@@ -66,7 +71,7 @@ function deriveRootCause(currentMetrics, prediction) {
   const status = Number(currentMetrics?.status_code || 200);
 
   if (ssl < 14) return "ssl_expiry_warning";
-  if (status >= 500 || error >= 10) return "error_spike";
+  if (status >= 500 || error >= 0.10) return "error_spike";
 
   const ratio = ttfb / Math.max(dns, 1);
   if (dns >= 250 && ratio <= 3.5) return "dns_degradation";
@@ -87,12 +92,11 @@ function computeConfidence(prediction, currentMetrics) {
   let metricScore = 0.15;
   metricScore += Math.min(ttfb / SLA_TTFB_MS, 1) * 0.30;
   metricScore += Math.min(dns / 300, 1) * 0.10;
-  metricScore += Math.min(error / 10, 1) * 0.20;
+  metricScore += Math.min(error / 0.50, 1) * 0.20;  // error_rate is 0.0–1.0 fraction
   metricScore += prediction?.iso_flag === -1 ? 0.15 : 0;
   metricScore += breachEta > 0 && breachEta <= 30 ? 0.15 : 0;
-  // Status code errors boost confidence significantly
-  if (status >= 500) metricScore += 0.25;
-  else if (status >= 400 || status === 0) metricScore += 0.15;
+  // Only 5xx and connection failures boost confidence (4xx from WAFs/bot-protection is expected)
+  if (status >= 500 || status === 0) metricScore += 0.25;
   // High TTFB (over 50% SLA) adds urgency
   if (ttfb > SLA_TTFB_MS * 0.5) metricScore += 0.10;
 
@@ -112,9 +116,9 @@ function deriveSeverity(prediction, currentMetrics, confidence) {
   const breachEta = Number(prediction?.breach_eta_min || 0);
 
   if (breachEta > 0 && breachEta <= 10) return "critical";
-  if (ttfb >= SLA_TTFB_MS || error >= 15 || confidence >= 0.85) return "critical";
+  if (ttfb >= SLA_TTFB_MS || error >= 0.15 || confidence >= 0.85) return "critical";
   if (breachEta > 0 && breachEta <= 30) return "warning";
-  if (ttfb >= SLA_TTFB_MS * 0.7 || error >= 5 || confidence >= 0.55) return "warning";
+  if (ttfb >= SLA_TTFB_MS * 0.7 || error >= 0.05 || confidence >= 0.55) return "warning";
   return "normal";
 }
 
@@ -144,7 +148,7 @@ async function savePrediction(serviceId, url, severity, confidence, predictionDa
 }
 
 async function saveIncident(serviceId, url, severity, confidence, predictionId, metricsSnapshot, rootCause) {
-  const id = `INC-${Date.now()}`;
+  const id = `INC-${randomUUID().split('-')[0]}`;
   await pool.query(
     `INSERT INTO incidents.incidents (
        id, service_id, url, severity, confidence, prediction_id, root_cause, metrics_snapshot, status
@@ -182,8 +186,8 @@ app.post("/evaluate", async (req, res) => {
 
     console.log(`[Decision] ${service_id} | url=${resolvedUrl} | severity=${severity} | confidence=${(confidence * 100).toFixed(1)}% | root_cause=${rootCause}`);
 
-    // ── confidence < 0.30 → log only, no DB insert ──
-    if (confidence < 0.30) {
+    // ── confidence < 0.70 → log only, no DB insert ──
+    if (confidence < 0.70) {
       console.log(`[Decision] LOW CONFIDENCE (${(confidence * 100).toFixed(1)}%) — log only`);
       return res.json({ status: "normal", confidence, severity, root_cause: rootCause, url: resolvedUrl });
     }
@@ -260,6 +264,21 @@ app.post("/evaluate", async (req, res) => {
   }
 });
 
-app.get("/health", (req, res) => res.json({ status: "running" }));
+app.get("/health", async (req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "running", db: "connected" });
+  } catch (err) {
+    res.status(503).json({ status: "unhealthy", error: err.message });
+  }
+});
 
-app.listen(5000, () => console.log("Decision Engine running on port 5000"));
+const server = app.listen(5000, () => console.log("Decision Engine running on port 5000"));
+
+// Graceful shutdown
+process.on("SIGTERM", async () => {
+  console.log("[Decision] Shutting down...");
+  server.close();
+  await pool.end();
+  process.exit(0);
+});

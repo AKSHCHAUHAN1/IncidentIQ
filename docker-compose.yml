@@ -68,7 +68,7 @@ services:
       STATUS_INTERVAL_HOURS:  6
       # Optional: speeds up CrUX fetching from 150/day to 150/100s
       # Get free key: console.cloud.google.com → Enable "Chrome UX Report API"
-      GOOGLE_API_KEY: "AIzaSyCb6nJx7lZNuDeQoPVqLchYd-TRY16JqWc"
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
     command: python3 src/collector_scheduler.py
     volumes:
       - ./services/website-probe/probe-targets.json:/app/probe-targets.json:ro
@@ -175,7 +175,7 @@ services:
       DB_PASSWORD:  postgres
       DB_NAME:      incident_predictor
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/incident_predictor
-      JWT_SECRET:   change-this-in-production
+      JWT_SECRET:   "${JWT_SECRET:-change-this-in-production}"
       PORT:         3000
     ports:
       - "3000:3000"
@@ -193,6 +193,9 @@ services:
       VITE_API_URL: http://localhost:3000
     ports:
       - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     depends_on:
       - api-gateway
     restart: unless-stopped

@@ -9,6 +9,7 @@ const Monitor     = lazy(() => import('./pages/Monitor'));
 const Predictions = lazy(() => import('./pages/Predictions'));
 
 const Approvals   = lazy(() => import('./pages/Approvals'));
+const Incidents   = lazy(() => import('./pages/Incidents'));
 
 
 function AnimatedRoutes() {
@@ -23,6 +24,7 @@ function AnimatedRoutes() {
 
           <Route path="/alerts"      element={<Approvals />}   />
           <Route path="/approvals"   element={<Navigate to="/alerts" replace />} />
+          <Route path="/incidents"   element={<Incidents />}   />
 
         </Routes>
       </Suspense>

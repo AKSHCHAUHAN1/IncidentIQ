@@ -16,7 +16,7 @@ router.get("/", async (req, res) => {
             ELSE split_part(ms.url, '/', 1)
           END
         FROM public.monitored_sites ms
-        WHERE ms.is_active = TRUE
+        WHERE ms.is_active = TRUE AND ms.is_training_only = FALSE
       )`
     ];
     let params = [];

@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import { createServer } from "http";
 import rateLimit from "express-rate-limit";
 import { generateToken, authMiddleware } from "./auth.js";
@@ -14,9 +15,12 @@ import { pool } from "./db.js";
 const app = express();
 const httpServer = createServer(app);
 
-app.use(cors());
-app.use(express.json());
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+
+app.use(helmet({ contentSecurityPolicy: false }));  // CSP disabled for WebSocket compat
+app.use(cors({ origin: [FRONTEND_ORIGIN, "http://localhost:3000"], credentials: true }));
+app.use(express.json({ limit: "1mb" }));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false }));
 
 initWebSocket(httpServer);
 
