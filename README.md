@@ -105,12 +105,16 @@ The dashboard will be available at **http://localhost:5173**.
 
 ---
 
-## 🧪 Testing with Chaos
+## 🧪 Testing with Chaos & Load
 
-To test the anomaly detection pipeline in real-time, execute the included `loadtest.js` using `k6`. This will stage thousands of virtual users against a target, causing a TTFB spike that will be caught by the probe, streamed through Redis, analyzed by the ML ensemble, and triggered as a high-confidence alert on the React dashboard.
+To test the anomaly detection pipeline in real-time, execute the included k6 scripts in `tests/`. This will stage thousands of virtual users against a target, causing a TTFB spike that will be caught by the probe, streamed through Redis, analyzed by the ML ensemble, and triggered as a high-confidence alert on the React dashboard.
 
 ```bash
-k6 run loadtest.js
+# Aggressive spike load test
+k6 run tests/loadtest.js
+
+# Gradual degradation test (slow TTFB climb)
+k6 run tests/slow_degradation.js
 ```
 
 ---
